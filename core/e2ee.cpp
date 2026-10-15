@@ -118,8 +118,9 @@ TToDevice TMachine::ShareRoomKey(const std::string& roomId, const std::vector<TD
     }
 
     TToDevice messages;
+    auto& shared = SharedWith[roomId];
     for (const auto& device : devices) {
-        if (device.UserId == UserId_ && device.DeviceId == DeviceId_) {
+        if ((device.UserId == UserId_ && device.DeviceId == DeviceId_) || shared.count(device.UserId + "|" + device.DeviceId)) {
             continue;
         }
         // Use an existing Olm session with the device, or start one with a claimed, signed one-time key
@@ -164,8 +165,101 @@ TToDevice TMachine::ShareRoomKey(const std::string& roomId, const std::vector<TD
                 {device.Curve25519, TJson::TObject{{"type", static_cast<std::int64_t>(encrypted.Type)}, {"body", encrypted.Body}}},
             }},
         });
+        shared.insert(device.UserId + "|" + device.DeviceId);
     }
     return messages;
+}
+
+TJson TMachine::ClaimRequestFor(const std::string& roomId, const std::vector<TDevice>& devices) const {
+    const auto sharedIt = SharedWith.find(roomId);
+    TJson::TObject users;
+    for (const auto& device : devices) {
+        if ((device.UserId == UserId_ && device.DeviceId == DeviceId_) ||
+            (sharedIt != SharedWith.end() && sharedIt->second.count(device.UserId + "|" + device.DeviceId))) {
+            continue;
+        }
+        const auto sessions = OlmSessions.find(device.Curve25519);
+        if (sessions != OlmSessions.end() && !sessions->second.empty()) {
+            continue;
+        }
+        TJson::TObject perDevice = users[device.UserId].IsObject() ? users[device.UserId].AsObject() : TJson::TObject{};
+        perDevice[device.DeviceId] = "signed_curve25519";
+        users[device.UserId] = TJson(std::move(perDevice));
+    }
+    return TJson(std::move(users));
+}
+
+TJson TMachine::Save() const {
+    TJson::TObject olm;
+    for (const auto& [key, sessions] : OlmSessions) {
+        TJson::TArray saved;
+        for (const auto& session : sessions) {
+            saved.push_back(session.Save());
+        }
+        olm[key] = TJson(std::move(saved));
+    }
+    TJson::TObject outbound;
+    for (const auto& [room, session] : Outbound) {
+        TJson::TArray shared;
+        if (const auto it = SharedWith.find(room); it != SharedWith.end()) {
+            shared.assign(it->second.begin(), it->second.end());
+        }
+        outbound[room] = TJson(TJson::TObject{{"session", session.Save()}, {"shared_with", TJson(std::move(shared))}});
+    }
+    TJson::TArray inbound;
+    for (const auto& [id, session] : Inbound) {
+        inbound.push_back(TJson::TObject{{"room_id", id.first}, {"session", session.Save()}});
+    }
+    return TJson(TJson::TObject{
+        {"user_id", UserId_},
+        {"device_id", DeviceId_},
+        {"account", Account_.Save()},
+        {"olm", TJson(std::move(olm))},
+        {"outbound", TJson(std::move(outbound))},
+        {"inbound", TJson(std::move(inbound))},
+    });
+}
+
+std::optional<TMachine> TMachine::Load(const TJson& saved) {
+    auto account = NOlm::TAccount::Load(saved["account"]);
+    if (!account || !saved["user_id"].IsString() || !saved["device_id"].IsString()) {
+        return std::nullopt;
+    }
+    TMachine machine(saved["user_id"].AsString(), saved["device_id"].AsString(), std::move(*account));
+    if (saved["olm"].IsObject()) {
+        for (const auto& [key, sessions] : saved["olm"].AsObject()) {
+            if (!sessions.IsArray()) {
+                continue;
+            }
+            for (const auto& json : sessions.AsArray()) {
+                if (auto session = NOlm::TSession::Load(json)) {
+                    machine.OlmSessions[key].push_back(std::move(*session));
+                }
+            }
+        }
+    }
+    if (saved["outbound"].IsObject()) {
+        for (const auto& [room, json] : saved["outbound"].AsObject()) {
+            if (auto session = NMegolm::TOutboundSession::Load(json["session"])) {
+                machine.Outbound.insert_or_assign(room, std::move(*session));
+                if (json["shared_with"].IsArray()) {
+                    for (const auto& device : json["shared_with"].AsArray()) {
+                        if (device.IsString()) {
+                            machine.SharedWith[room].insert(device.AsString());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (saved["inbound"].IsArray()) {
+        for (const auto& json : saved["inbound"].AsArray()) {
+            if (auto session = NMegolm::TInboundSession::Load(json["session"])) {
+                machine.Inbound.insert_or_assign(std::make_pair(json.StringOr("room_id"), session->SessionId()), std::move(*session));
+            }
+        }
+    }
+    return machine;
 }
 
 TJson TMachine::EncryptRoomEvent(const std::string& roomId, const std::string& type, const TJson& content) {
@@ -272,6 +366,37 @@ std::optional<TJson> TMachine::DecryptRoomEvent(const std::string& roomId, const
         return std::nullopt;
     }
     return payload;
+}
+
+bool DecryptWaiting(TSyncState& state, const TMachine& machine) {
+    bool changed = false;
+    for (auto& [roomId, room] : state.Rooms) {
+        for (auto& message : room.Timeline) {
+            if (!message.IsWaitingForKey()) {
+                continue;
+            }
+            std::optional<TJson> payload;
+            try {
+                payload = machine.DecryptRoomEvent(roomId, TJson::Parse(message.EncryptedEvent));
+            } catch (const std::runtime_error&) {
+            }
+            if (!payload) {
+                continue;
+            }
+            const TJson& content = (*payload)["content"];
+            if (payload->StringOr("type") == "m.room.message" && content["body"].IsString()) {
+                message.MsgType = content.StringOr("msgtype", "m.text");
+                message.Body = content["body"].AsString();
+            } else {
+                message.MsgType = payload->StringOr("type", "unknown");  // removed below
+            }
+            changed = true;
+        }
+        std::erase_if(room.Timeline, [](const TMessage& message) {
+            return !message.EncryptedEvent.empty() && !message.MsgType.empty() && message.Body.empty();
+        });
+    }
+    return changed;
 }
 
 } // namespace NHoshi::NE2ee

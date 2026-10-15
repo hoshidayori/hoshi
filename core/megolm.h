@@ -4,6 +4,7 @@
 // specification in libolm's docs/megolm.md. Wire formats are byte-compatible with libolm and vodozemac.
 
 #include "crypto.h"
+#include "json.h"
 
 #include <array>
 #include <cstdint>
@@ -40,7 +41,15 @@ public:
     std::string SessionKey() const;
     std::uint32_t MessageIndex() const { return Ratchet.Index; }
 
+    TJson Save() const;
+    static std::optional<TOutboundSession> Load(const TJson& saved);
+
 private:
+    TOutboundSession(TRatchet ratchet, NCrypto::TEd25519KeyPair signing)
+        : Ratchet(ratchet)
+        , Signing(signing)
+    {}
+
     TRatchet Ratchet;
     NCrypto::TEd25519KeyPair Signing;
 };
@@ -62,6 +71,10 @@ public:
     std::uint32_t FirstKnownIndex() const { return Initial.Index; }
     // Exported key (version 1) at the given index, at or after FirstKnownIndex()
     std::optional<std::string> Export(std::uint32_t index) const;
+
+    // Saved as the export at the first known index
+    TJson Save() const;
+    static std::optional<TInboundSession> Load(const TJson& saved);
 
 private:
     TRatchet Initial;

@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,9 @@ struct TMessage {
     std::int64_t OriginServerTs = 0;
     std::string TxnId;  // for messages sent from this device: the transaction id of the send request
     ESendState SendState = ESendState::Sent;
+    // For an m.room.encrypted event: the event as received. MsgType and Body stay empty until it is decrypted.
+    std::string EncryptedEvent;
+    bool IsWaitingForKey() const { return !EncryptedEvent.empty() && MsgType.empty(); }
 };
 
 struct TRoom {
@@ -36,6 +40,8 @@ struct TRoom {
     bool HistoryComplete = false;  // /messages reached the start of the room
     // Messages written on this device that /sync has not returned yet, shown after the timeline in order
     std::vector<TMessage> Pending;
+    // Joined and invited users, from m.room.member; in an encrypted room their devices get the room key
+    std::set<std::string> Members;
 };
 
 // The part of a /sync response the client keeps. Rooms are keyed by room id.

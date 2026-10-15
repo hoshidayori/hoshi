@@ -6,9 +6,11 @@
 #include "json.h"
 #include "megolm.h"
 #include "olm.h"
+#include "sync.h"
 
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -51,7 +53,11 @@ public:
 
     // Olm-encrypted m.room_key for each device, using one-time keys from a /keys/claim response.
     // Devices without a valid signed one-time key are skipped. Creates the room's outbound session if needed.
+    // Devices that already got the room's current session key are skipped too.
     TToDevice ShareRoomKey(const std::string& roomId, const std::vector<TDevice>& devices, const TJson& claimResponse);
+    // Devices of the list that still need the room's current session key and have no Olm session to send it over:
+    // the body for /keys/claim (user -> device -> "signed_curve25519"), empty if none
+    TJson ClaimRequestFor(const std::string& roomId, const std::vector<TDevice>& devices) const;
     // The content of an m.room.encrypted event for the room's current outbound session
     TJson EncryptRoomEvent(const std::string& roomId, const std::string& type, const TJson& content);
 
@@ -59,6 +65,10 @@ public:
     bool ReceiveToDevice(const TJson& event);
     // Decrypts an m.room.encrypted timeline event: the plaintext event {"type", "content", "room_id"}, or nullopt
     std::optional<TJson> DecryptRoomEvent(const std::string& roomId, const TJson& event) const;
+
+    // Everything, private keys included: the caller stores it protected (Keychain or a protected file)
+    TJson Save() const;
+    static std::optional<TMachine> Load(const TJson& saved);
 
 private:
     std::optional<std::string> DecryptOlm(const std::string& senderKey, const NOlm::TOlmMessage& message);
@@ -68,10 +78,15 @@ private:
     NOlm::TAccount Account_;
     // Olm sessions by the other device's Curve25519 key, newest first
     std::map<std::string, std::vector<NOlm::TSession>> OlmSessions;
-    // Megolm sessions for sending, by room
+    // Megolm sessions for sending, by room, and the devices ("user|device") that got each one's key
     std::map<std::string, NMegolm::TOutboundSession> Outbound;
+    std::map<std::string, std::set<std::string>> SharedWith;
     // Megolm sessions for receiving, by (room, session id)
     std::map<std::pair<std::string, std::string>, NMegolm::TInboundSession> Inbound;
 };
+
+// Decrypts the timeline messages that are waiting for their key. Decrypted events that are not messages
+// (reactions and the like) leave the timeline. Returns whether anything changed.
+bool DecryptWaiting(TSyncState& state, const TMachine& machine);
 
 } // namespace NHoshi::NE2ee

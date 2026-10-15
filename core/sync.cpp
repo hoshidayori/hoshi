@@ -14,12 +14,33 @@ void ApplyStateEvent(TRoom& room, const TJson& event) {
         room.Name = event["content"].StringOr("name");
     } else if (type == "m.room.encryption") {
         room.Encrypted = true;
+    } else if (type == "m.room.member" && event["state_key"].IsString()) {
+        const std::string membership = event["content"].StringOr("membership");
+        if (membership == "join" || membership == "invite") {
+            room.Members.insert(event["state_key"].AsString());
+        } else {
+            room.Members.erase(event["state_key"].AsString());
+        }
     }
 }
 
-// The message the client shows for an event, if the event is a message with a body
+// The message the client shows for an event, if the event is a message with a body, or an encrypted event
 std::optional<TMessage> ParseMessage(const TJson& event) {
-    if (event["state_key"].IsString() || event.StringOr("type") != "m.room.message") {
+    if (event["state_key"].IsString()) {
+        return std::nullopt;
+    }
+    if (event.StringOr("type") == "m.room.encrypted") {
+        TMessage message;
+        message.EventId = event.StringOr("event_id");
+        message.Sender = event.StringOr("sender");
+        if (event["origin_server_ts"].IsInt()) {
+            message.OriginServerTs = event["origin_server_ts"].AsInt();
+        }
+        message.TxnId = event["unsigned"].StringOr("transaction_id");
+        message.EncryptedEvent = event.Dump();
+        return message;
+    }
+    if (event.StringOr("type") != "m.room.message") {
         return std::nullopt;
     }
     const TJson& content = event["content"];

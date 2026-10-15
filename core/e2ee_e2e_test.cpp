@@ -64,7 +64,10 @@ int main() {
         // An encrypted room with bob in it
         const std::string roomId = alice.CreateEncryptedRoom(Unique("Тайна "), {bob.UserId()});
         bob.JoinRoom(roomId);
-        std::string since = bob.FetchSync({}, 0).StringOr("next_batch");
+        TSyncState bobState;
+        const TJson initial = bob.FetchSync({}, 0);
+        bobState.Apply(initial);
+        std::string since = initial.StringOr("next_batch");
 
         // Alice claims a one-time key of bob's device and sends the room key over Olm
         const TJson claim = alice.ClaimKeys(TJson(TJson::TObject{{bob.UserId(), TJson::TObject{{bob.DeviceId(), "signed_curve25519"}}}}));
@@ -84,12 +87,17 @@ int main() {
         const std::string eventId = alice.SendEvent(roomId, "m.room.encrypted", encrypted, Unique("txn"));
         Expect(!eventId.empty(), "encrypted event sent");
 
+        // Bob's crypto state survives a save and load, as when the app restarts
+        bobMachine = *TMachine::Load(TJson::Parse(bobMachine.Save().Dump()));
+        aliceMachine = *TMachine::Load(TJson::Parse(aliceMachine.Save().Dump()));
+
         bool gotKey = false;
         bool gotMessage = false;
         bool serverSawPlaintext = false;
         for (int i = 0; i < 6 && !(gotKey && gotMessage); ++i) {
             const TJson sync = bob.FetchSync(since, 2000);
             since = sync.StringOr("next_batch");
+            bobState.Apply(sync);
             if (sync["to_device"]["events"].IsArray()) {
                 for (const auto& event : sync["to_device"]["events"].AsArray()) {
                     gotKey = bobMachine.ReceiveToDevice(event) || gotKey;
@@ -111,6 +119,16 @@ int main() {
         Expect(gotKey, "bob decrypted the room key from the Olm to-device message");
         Expect(gotMessage, "bob decrypted alice's Megolm message");
         Expect(!serverSawPlaintext, "the event on the server has no plaintext body");
+
+        // The same through the timeline model: the message waits for its key, then decrypts in place
+        Expect(DecryptWaiting(bobState, bobMachine), "waiting messages decrypt once the key is there");
+        bool inTimeline = false;
+        for (const auto& message : bobState.Rooms[roomId].Timeline) {
+            inTimeline = inTimeline || (message.EventId == eventId && message.Body == secret && message.MsgType == "m.text");
+        }
+        Expect(inTimeline, "the decrypted message is in bob's timeline");
+        Expect(bobState.Rooms[roomId].Encrypted && bobState.Rooms[roomId].Members.count(alice.UserId()) &&
+            bobState.Rooms[roomId].Members.count(bob.UserId()), "room is encrypted and lists both members");
 
         // Alice can read her own message with the inbound copy of her session
         TJson own(TJson::TObject{{"type", "m.room.encrypted"}, {"content", encrypted}});

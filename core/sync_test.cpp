@@ -84,7 +84,8 @@ int main() {
 
     const TRoom& secret = state.Rooms.at("!secret:example.com");
     Expect(secret.Encrypted, "encryption seen in timeline state event");
-    Expect(secret.Timeline.empty(), "encrypted events are not shown as messages yet");
+    Expect(secret.Timeline.size() == 1 && secret.Timeline[0].IsWaitingForKey() && secret.Timeline[0].EventId == "$cipher",
+        "an encrypted event waits in the timeline for its key");
 
     state.Apply(TJson::Parse(SecondSync));
     const TRoom& after = state.Rooms.at("!726s6s6q:example.com");

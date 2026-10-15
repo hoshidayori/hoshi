@@ -298,4 +298,34 @@ std::optional<std::string> TInboundSession::Export(std::uint32_t index) const {
     return Base64Encode(key);
 }
 
+TJson TOutboundSession::Save() const {
+    return TJson(TJson::TObject{
+        {"ratchet", Base64Encode(TBytes(Ratchet.Data.begin(), Ratchet.Data.end()))},
+        {"index", static_cast<std::int64_t>(Ratchet.Index)},
+        {"signing", Base64Encode(ToBytes(Signing.Seed))},
+    });
+}
+
+std::optional<TOutboundSession> TOutboundSession::Load(const TJson& saved) {
+    const auto ratchet = saved["ratchet"].IsString() ? Base64Decode(saved["ratchet"].AsString()) : std::nullopt;
+    const auto seed = saved["signing"].IsString() ? Base64Decode(saved["signing"].AsString()) : std::nullopt;
+    if (!ratchet || ratchet->size() != 128 || !seed || seed->size() != 32 || !saved["index"].IsInt()) {
+        return std::nullopt;
+    }
+    TRatchet r;
+    std::copy(ratchet->begin(), ratchet->end(), r.Data.begin());
+    r.Index = static_cast<std::uint32_t>(saved["index"].AsInt());
+    TKey32 s{};
+    std::copy(seed->begin(), seed->end(), s.begin());
+    return TOutboundSession(r, TEd25519KeyPair::FromSeed(s));
+}
+
+TJson TInboundSession::Save() const {
+    return TJson(TJson::TObject{{"export", *Export(Initial.Index)}});
+}
+
+std::optional<TInboundSession> TInboundSession::Load(const TJson& saved) {
+    return saved["export"].IsString() ? FromExport(saved["export"].AsString()) : std::nullopt;
+}
+
 } // namespace NHoshi::NMegolm
