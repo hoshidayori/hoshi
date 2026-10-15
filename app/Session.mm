@@ -5,6 +5,7 @@
 #include "client.h"
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 
@@ -243,20 +244,61 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
     });
 }
 
-- (void)sendText:(NSString*)text toRoom:(const std::string&)roomId completion:(void (^)(NSString*))completion {
+- (void)sendText:(NSString*)text toRoom:(const std::string&)roomId {
     const std::string body = text.UTF8String;
-    const std::string room = roomId;
     const std::string txnId = NSUUID.UUID.UUIDString.UTF8String;
-    dispatch_async(_send->Queue, ^{
-        NSString* error = nil;
-        try {
-            self->_send->Client->SendText(room, body, txnId);
-        } catch (const NHoshi::TMatrixError& e) {
-            error = Describe(e);
+    const std::int64_t nowMs = static_cast<std::int64_t>(NSDate.date.timeIntervalSince1970 * 1000);
+    std::shared_ptr<NHoshi::TSyncState> snapshot;
+    {
+        std::lock_guard lock(_coreMutex);
+        _core.AddPending(roomId, txnId, _userId.UTF8String, body, nowMs);
+        snapshot = std::make_shared<NHoshi::TSyncState>(_core);
+    }
+    [self publish:snapshot];
+    [self sendPendingText:body room:roomId txnId:txnId];
+}
+
+- (void)retryMessage:(const std::string&)txnId inRoom:(const std::string&)roomId {
+    std::string body;
+    std::shared_ptr<NHoshi::TSyncState> snapshot;
+    {
+        std::lock_guard lock(_coreMutex);
+        const NHoshi::TMessage* pending = _core.RetryPending(roomId, txnId);
+        if (!pending) {
+            return;
         }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            completion(error);
-        });
+        body = pending->Body;
+        snapshot = std::make_shared<NHoshi::TSyncState>(_core);
+    }
+    [self publish:snapshot];
+    [self sendPendingText:body room:roomId txnId:txnId];
+}
+
+// The same transaction id on a retry makes the server treat it as the same message, so a send that did
+// reach the server before the connection broke is not duplicated
+- (void)sendPendingText:(const std::string&)body room:(const std::string&)roomId txnId:(const std::string&)txnId {
+    const std::string room = roomId;
+    const std::string txn = txnId;
+    const std::string text = body;
+    dispatch_async(_send->Queue, ^{
+        std::string eventId;
+        bool ok = true;
+        try {
+            eventId = self->_send->Client->SendText(room, text, txn);
+        } catch (const NHoshi::TMatrixError&) {
+            ok = false;
+        }
+        std::shared_ptr<NHoshi::TSyncState> snapshot;
+        {
+            std::lock_guard lock(self->_coreMutex);
+            if (ok) {
+                self->_core.MarkPendingSent(room, txn, eventId);
+            } else {
+                self->_core.MarkPendingFailed(room, txn);
+            }
+            snapshot = std::make_shared<NHoshi::TSyncState>(self->_core);
+        }
+        [self publish:snapshot];
     });
 }
 

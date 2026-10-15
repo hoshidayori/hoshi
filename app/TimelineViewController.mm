@@ -28,6 +28,7 @@ NSString* ToNs(const std::string& s) {
     UIButton* _toBottom;
     BOOL _hasOlder;
     BOOL _loadingOlder;
+    BOOL _sentSinceUpdate;
 }
 
 static const CGFloat MaxInputLines = 6;
@@ -171,23 +172,9 @@ static const CGFloat MaxInputLines = 6;
     }
     _input.text = @"";
     [self textViewDidChange:_input];
-    [self scrollToBottomAnimated:YES];
-    __weak TimelineViewController* weakSelf = self;
-    [_session sendText:text toRoom:_roomId completion:^(NSString* error) {
-        TimelineViewController* strongSelf = weakSelf;
-        if (!strongSelf || !error) {
-            return;
-        }
-        // Keep what the user wrote so nothing is lost, unless they already started a new message
-        if (strongSelf->_input.text.length == 0) {
-            strongSelf->_input.text = text;
-            [strongSelf textViewDidChange:strongSelf->_input];
-        }
-        UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Not sent" message:error
-                                                                preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        [strongSelf presentViewController:alert animated:YES completion:nil];
-    }];
+    _sentSinceUpdate = YES;  // the local echo arrives with the next state change; scroll to it then
+    // The message appears at once as pending; a failure keeps it in the timeline with a retry
+    [_session sendText:text toRoom:_roomId];
 }
 
 - (void)toBottomTapped {
@@ -236,7 +223,7 @@ static const CGFloat MaxInputLines = 6;
     const bool atBottom = [self isNearBottom];
     // Older messages went in front if the message we showed first is now further down
     size_t prepended = 0;
-    if (!first) {
+    if (!first && !_messages.front().EventId.empty()) {
         for (size_t i = 0; i < room.Timeline.size(); ++i) {
             if (room.Timeline[i].EventId == _messages.front().EventId) {
                 prepended = i;
@@ -246,10 +233,13 @@ static const CGFloat MaxInputLines = 6;
     }
     const CGFloat heightBefore = _table.contentSize.height;
     const CGFloat offsetBefore = _table.contentOffset.y;
+    // Messages still being sent from this device come after everything the server has confirmed
     _messages = room.Timeline;
+    _messages.insert(_messages.end(), room.Pending.begin(), room.Pending.end());
     [_table reloadData];
 
-    if (first) {
+    if (first || _sentSinceUpdate) {
+        _sentSinceUpdate = NO;
         [_table layoutIfNeeded];
         [self scrollToBottomAnimated:NO];
     } else if (prepended > 0) {
@@ -322,8 +312,17 @@ static const CGFloat MaxInputLines = 6;
         body.textContainerInset = UIEdgeInsetsMake(8, 10, 8, 10);
         body.translatesAutoresizingMaskIntoConstraints = NO;
 
+        // "Sending…" or "Not sent — tap to retry" under a message from this device; empty, it takes no space
+        UILabel* status = [[UILabel alloc] init];
+        status.tag = 3;
+        status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption2];
+        status.userInteractionEnabled = YES;
+        [status addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(statusTapped:)]];
+        status.translatesAutoresizingMaskIntoConstraints = NO;
+
         [cell.contentView addSubview:sender];
         [cell.contentView addSubview:body];
+        [cell.contentView addSubview:status];
         UILayoutGuide* margins = cell.contentView.layoutMarginsGuide;
         [NSLayoutConstraint activateConstraints:@[
             [sender.topAnchor constraintEqualToAnchor:margins.topAnchor],
@@ -332,12 +331,47 @@ static const CGFloat MaxInputLines = 6;
             [body.topAnchor constraintEqualToAnchor:sender.bottomAnchor constant:2],
             [body.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor],
             [body.trailingAnchor constraintLessThanOrEqualToAnchor:margins.trailingAnchor],
-            [body.bottomAnchor constraintEqualToAnchor:margins.bottomAnchor],
+            [status.topAnchor constraintEqualToAnchor:body.bottomAnchor constant:2],
+            [status.leadingAnchor constraintEqualToAnchor:margins.leadingAnchor constant:10],
+            [status.trailingAnchor constraintLessThanOrEqualToAnchor:margins.trailingAnchor],
+            [status.bottomAnchor constraintEqualToAnchor:margins.bottomAnchor],
         ]];
     }
+    UILabel* status = [cell.contentView viewWithTag:3];
     sender.text = ToNs(message.Sender);
     body.text = ToNs(message.Body);
+    switch (message.SendState) {
+        case NHoshi::TMessage::ESendState::Sent:
+            body.alpha = 1;
+            status.text = nil;
+            break;
+        case NHoshi::TMessage::ESendState::Sending:
+            body.alpha = 0.5;
+            status.text = @"Sending…";
+            status.textColor = UIColor.secondaryLabelColor;
+            break;
+        case NHoshi::TMessage::ESendState::Failed:
+            body.alpha = 0.5;
+            status.text = @"Not sent — tap to retry";
+            status.textColor = UIColor.systemRedColor;
+            break;
+    }
     return cell;
+}
+
+- (void)statusTapped:(UITapGestureRecognizer*)tap {
+    UIView* view = tap.view;
+    while (view && ![view isKindOfClass:[UITableViewCell class]]) {
+        view = view.superview;
+    }
+    NSIndexPath* indexPath = view ? [_table indexPathForCell:(UITableViewCell*)view] : nil;
+    if (!indexPath || indexPath.row >= static_cast<NSInteger>(_messages.size())) {
+        return;
+    }
+    const auto& message = _messages[static_cast<size_t>(indexPath.row)];
+    if (message.SendState == NHoshi::TMessage::ESendState::Failed) {
+        [_session retryMessage:message.TxnId inRoom:_roomId];
+    }
 }
 
 @end

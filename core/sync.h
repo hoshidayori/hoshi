@@ -11,11 +11,19 @@ namespace NHoshi {
 
 // A message from a room timeline, the part of an m.room.message event that the client shows
 struct TMessage {
-    std::string EventId;
+    enum class ESendState {
+        Sent,     // came from the server
+        Sending,  // written here, not confirmed by /sync yet
+        Failed,   // the send request failed; can be retried with the same TxnId
+    };
+
+    std::string EventId;  // empty for a message still being sent
     std::string Sender;
     std::string MsgType;  // m.text, m.notice, m.emote, m.image, ...
     std::string Body;
     std::int64_t OriginServerTs = 0;
+    std::string TxnId;  // for messages sent from this device: the transaction id of the send request
+    ESendState SendState = ESendState::Sent;
 };
 
 struct TRoom {
@@ -26,6 +34,8 @@ struct TRoom {
     bool Limited = false;    // the server skipped older events; prev_batch fetches them
     std::string PrevBatch;   // token for /messages?dir=b to fetch what comes before Timeline.front()
     bool HistoryComplete = false;  // /messages reached the start of the room
+    // Messages written on this device that /sync has not returned yet, shown after the timeline in order
+    std::vector<TMessage> Pending;
 };
 
 // The part of a /sync response the client keeps. Rooms are keyed by room id.
@@ -41,6 +51,15 @@ struct TSyncState {
     // Applies a /messages?dir=b response for the room: older messages go before the timeline, and the
     // next PrevBatch is its "end". No "end" or an empty chunk means the start of the room was reached.
     void PrependHistory(const std::string& roomId, const TJson& response);
+
+    // Local echo. A pending message leaves Pending when /sync returns the event, matched by
+    // unsigned.transaction_id or by the event id the send request returned.
+    void AddPending(const std::string& roomId, const std::string& txnId, const std::string& sender, const std::string& body,
+        std::int64_t nowMs);
+    void MarkPendingSent(const std::string& roomId, const std::string& txnId, const std::string& eventId);
+    void MarkPendingFailed(const std::string& roomId, const std::string& txnId);
+    // Returns the body to send again and marks the message as sending; nullptr if there is no such failed message
+    const TMessage* RetryPending(const std::string& roomId, const std::string& txnId);
 };
 
 } // namespace NHoshi

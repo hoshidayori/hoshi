@@ -44,8 +44,17 @@ int main() {
         bob.Sync(0);  // initial sync; later ones only bring new events
 
         const std::string text = Unique("Привет, Боб! ");
-        const std::string eventId = alice.SendText(roomId, text, Unique("txn"));
+        const std::string txnId = Unique("txn");
+        const std::string eventId = alice.SendText(roomId, text, txnId);
         Expect(!eventId.empty(), "send returned an event id");
+
+        // Local echo relies on the sender's own /sync naming the transaction
+        alice.Sync(0);
+        bool echoed = false;
+        for (const auto& message : alice.State().Rooms.at(roomId).Timeline) {
+            echoed = echoed || (message.EventId == eventId && message.TxnId == txnId);
+        }
+        Expect(echoed, "the sender's /sync carries unsigned.transaction_id");
 
         bool seen = false;
         for (int i = 0; i < 5 && !seen; ++i) {

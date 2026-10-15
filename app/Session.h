@@ -36,7 +36,10 @@ extern NSNotificationName const HSSessionDidLoseAuthorization;
 // Loads the page of messages before the room's timeline; completion says whether more history remains
 - (void)loadOlderInRoom:(const std::string&)roomId completion:(void (^)(BOOL more))completion;
 
-- (void)sendText:(NSString*)text toRoom:(const std::string&)roomId completion:(void (^)(NSString* error))completion;
+// Shows the message at once as pending (TRoom::Pending) and sends it; a failure leaves it marked failed
+- (void)sendText:(NSString*)text toRoom:(const std::string&)roomId;
+// Sends a failed message again with its original transaction id
+- (void)retryMessage:(const std::string&)txnId inRoom:(const std::string&)roomId;
 
 @property (nonatomic, readonly) NSString* userId;
 

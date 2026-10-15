@@ -34,6 +34,8 @@ std::optional<TMessage> ParseMessage(const TJson& event) {
     if (event["origin_server_ts"].IsInt()) {
         message.OriginServerTs = event["origin_server_ts"].AsInt();
     }
+    // Present only in the sender's own /sync, for events sent with a transaction id from this device's token
+    message.TxnId = event["unsigned"].StringOr("transaction_id");
     return message;
 }
 
@@ -43,8 +45,26 @@ void ApplyTimelineEvent(TRoom& room, const TJson& event) {
         return;
     }
     if (auto message = ParseMessage(event)) {
+        // The server has the message now, so its local echo goes away
+        std::erase_if(room.Pending, [&](const TMessage& pending) {
+            return (!message->TxnId.empty() && pending.TxnId == message->TxnId) ||
+                (!pending.EventId.empty() && pending.EventId == message->EventId);
+        });
         room.Timeline.push_back(std::move(*message));
     }
+}
+
+TMessage* FindPending(std::map<std::string, TRoom>& rooms, const std::string& roomId, const std::string& txnId) {
+    const auto room = rooms.find(roomId);
+    if (room == rooms.end()) {
+        return nullptr;
+    }
+    for (auto& pending : room->second.Pending) {
+        if (pending.TxnId == txnId) {
+            return &pending;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -127,6 +147,55 @@ void TSyncState::PrependHistory(const std::string& roomId, const TJson& response
         room.PrevBatch.clear();
         room.HistoryComplete = true;
     }
+}
+
+void TSyncState::AddPending(const std::string& roomId, const std::string& txnId, const std::string& sender,
+    const std::string& body, std::int64_t nowMs)
+{
+    const auto room = Rooms.find(roomId);
+    if (room == Rooms.end()) {
+        return;
+    }
+    TMessage message;
+    message.Sender = sender;
+    message.MsgType = "m.text";
+    message.Body = body;
+    message.OriginServerTs = nowMs;
+    message.TxnId = txnId;
+    message.SendState = TMessage::ESendState::Sending;
+    room->second.Pending.push_back(std::move(message));
+}
+
+void TSyncState::MarkPendingSent(const std::string& roomId, const std::string& txnId, const std::string& eventId) {
+    const auto room = Rooms.find(roomId);
+    if (room == Rooms.end()) {
+        return;
+    }
+    // /sync may have delivered the event before the send request returned
+    for (const auto& message : room->second.Timeline) {
+        if (message.EventId == eventId) {
+            std::erase_if(room->second.Pending, [&](const TMessage& pending) { return pending.TxnId == txnId; });
+            return;
+        }
+    }
+    if (TMessage* pending = FindPending(Rooms, roomId, txnId)) {
+        pending->EventId = eventId;  // still shown as sending until /sync confirms it
+    }
+}
+
+void TSyncState::MarkPendingFailed(const std::string& roomId, const std::string& txnId) {
+    if (TMessage* pending = FindPending(Rooms, roomId, txnId)) {
+        pending->SendState = TMessage::ESendState::Failed;
+    }
+}
+
+const TMessage* TSyncState::RetryPending(const std::string& roomId, const std::string& txnId) {
+    TMessage* pending = FindPending(Rooms, roomId, txnId);
+    if (!pending || pending->SendState != TMessage::ESendState::Failed) {
+        return nullptr;
+    }
+    pending->SendState = TMessage::ESendState::Sending;
+    return pending;
 }
 
 } // namespace NHoshi

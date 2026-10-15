@@ -110,6 +110,25 @@ int main() {
     state.PrependHistory("!726s6s6q:example.com", TJson::Parse(R"({"start": "t20-1_0_0", "chunk": []})"));
     Expect(state.Rooms.at("!726s6s6q:example.com").HistoryComplete, "empty chunk without end completes the history");
 
+    // Local echo: pending until /sync returns the event with our transaction id
+    state.AddPending("!726s6s6q:example.com", "txnA", "@alice:example.com", "уже пишу", 1432735830000);
+    state.AddPending("!726s6s6q:example.com", "txnB", "@alice:example.com", "и это", 1432735830001);
+    Expect(state.Rooms.at("!726s6s6q:example.com").Pending.size() == 2, "two pending");
+    state.MarkPendingFailed("!726s6s6q:example.com", "txnB");
+    Expect(state.Rooms.at("!726s6s6q:example.com").Pending.at(1).SendState == TMessage::ESendState::Failed, "failed send");
+    const TMessage* retry = state.RetryPending("!726s6s6q:example.com", "txnB");
+    Expect(retry && retry->Body == "и это" && retry->SendState == TMessage::ESendState::Sending, "retry keeps the text");
+    Expect(state.RetryPending("!726s6s6q:example.com", "txnB") == nullptr, "a sending message is not retried twice");
+    state.MarkPendingSent("!726s6s6q:example.com", "txnB", "$echoB");
+    state.Apply(TJson::Parse(R"({"next_batch": "s2b", "rooms": {"join": {"!726s6s6q:example.com": {"timeline": {"events": [
+        {"type": "m.room.message", "sender": "@alice:example.com", "event_id": "$echoA", "content": {"msgtype": "m.text", "body": "уже пишу"},
+         "unsigned": {"transaction_id": "txnA"}},
+        {"type": "m.room.message", "sender": "@alice:example.com", "event_id": "$echoB", "content": {"msgtype": "m.text", "body": "и это"}}
+    ]}}}}})"));
+    const TRoom& echoed = state.Rooms.at("!726s6s6q:example.com");
+    Expect(echoed.Pending.empty(), "echo by transaction id and by event id clears pending");
+    Expect(echoed.Timeline.back().Body == "и это" && echoed.Timeline.back().SendState == TMessage::ESendState::Sent, "echo is in the timeline");
+
     state.Apply(TJson::Parse(R"({"next_batch": "s3", "rooms": {"leave": {"!secret:example.com": {"timeline": {"events": []}}}}})"));
     Expect(state.Rooms.count("!secret:example.com") == 0, "left room is dropped");
     Expect(state.Rooms.count("!726s6s6q:example.com") == 1, "other rooms stay");
