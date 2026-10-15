@@ -2,6 +2,7 @@
 NOTES.md
 build/
 build-sim/
+build-device/
 screenshots/
 *.log
 # Local check that the Swift SDK package downloads; not part of the client

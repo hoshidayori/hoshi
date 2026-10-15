@@ -47,6 +47,7 @@ if(HOSHI_IOS)
         app/UrlSessionHttp.mm
     )
     target_include_directories(Hoshi PRIVATE app)
+    target_link_libraries(Hoshi PRIVATE "-framework Security")
     target_link_libraries(Hoshi PRIVATE hoshi_core "-framework UIKit" "-framework Foundation" "-framework CoreGraphics" "-framework Security")
     target_compile_options(Hoshi PRIVATE -fobjc-arc -Wall -Wextra -Werror)
     set_target_properties(Hoshi PROPERTIES
