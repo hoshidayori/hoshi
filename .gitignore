@@ -1,0 +1,12 @@
+# Private working notes, not for the public repository
+NOTES.md
+build/
+*.log
+# Local check that the Swift SDK package downloads; not part of the client
+probe/
+synapse/venv/
+synapse/data/
+# Local test server secrets: shared registration secret, macaroon and form secrets, signing key
+synapse/homeserver.yaml
+synapse/*.signing.key
+synapse/*.log.config
