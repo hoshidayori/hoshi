@@ -38,9 +38,14 @@ if(HOSHI_IOS)
     enable_language(OBJCXX)
     add_executable(Hoshi MACOSX_BUNDLE
         app/main.mm
+        app/LoginViewController.mm
+        app/RoomsViewController.mm
         app/TimelineViewController.mm
+        app/Session.mm
+        app/UrlSessionHttp.mm
     )
-    target_link_libraries(Hoshi PRIVATE hoshi_core "-framework UIKit" "-framework Foundation")
+    target_include_directories(Hoshi PRIVATE app)
+    target_link_libraries(Hoshi PRIVATE hoshi_core "-framework UIKit" "-framework Foundation" "-framework CoreGraphics")
     target_compile_options(Hoshi PRIVATE -fobjc-arc -Wall -Wextra -Werror)
     set_target_properties(Hoshi PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/app/Info.plist

@@ -1,6 +1,6 @@
 #import <UIKit/UIKit.h>
 
-#import "TimelineViewController.h"
+#import "LoginViewController.h"
 
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property (nonatomic, strong) UIWindow* window;
@@ -10,8 +10,7 @@
 
 - (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    TimelineViewController* timeline = [[TimelineViewController alloc] initWithStyle:UITableViewStylePlain];
-    self.window.rootViewController = [[UINavigationController alloc] initWithRootViewController:timeline];
+    self.window.rootViewController = [[UINavigationController alloc] initWithRootViewController:[[LoginViewController alloc] init]];
     [self.window makeKeyAndVisible];
     return YES;
 }
