@@ -375,6 +375,33 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
     });
 }
 
+- (void)changeMembership:(const std::string&)roomId join:(BOOL)join completion:(void (^)(NSString*))completion {
+    const std::string room = roomId;
+    dispatch_async(_send->Queue, ^{
+        NSString* error = nil;
+        try {
+            if (join) {
+                self->_send->Client->JoinRoom(room);
+            } else {
+                self->_send->Client->LeaveRoom(room);
+            }
+        } catch (const NHoshi::TMatrixError& e) {
+            error = Describe(e);
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(error);
+        });
+    });
+}
+
+- (void)joinRoom:(const std::string&)roomId completion:(void (^)(NSString*))completion {
+    [self changeMembership:roomId join:YES completion:completion];
+}
+
+- (void)declineInvite:(const std::string&)roomId completion:(void (^)(NSString*))completion {
+    [self changeMembership:roomId join:NO completion:completion];
+}
+
 - (void)sendText:(NSString*)text toRoom:(const std::string&)roomId {
     const std::string body = text.UTF8String;
     const std::string txnId = NSUUID.UUID.UUIDString.UTF8String;

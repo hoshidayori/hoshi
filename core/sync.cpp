@@ -94,11 +94,33 @@ void TSyncState::Apply(const TJson& response) {
     if (response["next_batch"].IsString()) {
         NextBatch = response["next_batch"].AsString();
     }
-    // Rooms the user left or was removed from are dropped from the list
+    // Rooms the user left or was removed from are dropped from the list, and so are declined invites
     const TJson& left = response["rooms"]["leave"];
     if (left.IsObject()) {
         for (const auto& [roomId, data] : left.AsObject()) {
             Rooms.erase(roomId);
+            Invites.erase(roomId);
+        }
+    }
+    const TJson& invited = response["rooms"]["invite"];
+    if (invited.IsObject()) {
+        for (const auto& [roomId, data] : invited.AsObject()) {
+            TInvite invite;
+            invite.RoomId = roomId;
+            const TJson& events = data["invite_state"]["events"];
+            if (events.IsArray()) {
+                for (const auto& event : events.AsArray()) {
+                    const std::string type = event.StringOr("type");
+                    if (type == "m.room.name") {
+                        invite.Name = event["content"].StringOr("name");
+                    } else if (type == "m.room.encryption") {
+                        invite.Encrypted = true;
+                    } else if (type == "m.room.member" && event["content"].StringOr("membership") == "invite") {
+                        invite.Inviter = event.StringOr("sender");
+                    }
+                }
+            }
+            Invites[roomId] = std::move(invite);
         }
     }
     const TJson& joined = response["rooms"]["join"];
@@ -106,6 +128,7 @@ void TSyncState::Apply(const TJson& response) {
         return;
     }
     for (const auto& [roomId, data] : joined.AsObject()) {
+        Invites.erase(roomId);
         const bool seenBefore = Rooms.count(roomId) != 0;
         TRoom& room = Rooms[roomId];
         room.Id = roomId;

@@ -130,6 +130,17 @@ int main() {
     Expect(echoed.Pending.empty(), "echo by transaction id and by event id clears pending");
     Expect(echoed.Timeline.back().Body == "и это" && echoed.Timeline.back().SendState == TMessage::ESendState::Sent, "echo is in the timeline");
 
+    // Invites from stripped state, gone once joined
+    state.Apply(TJson::Parse(R"({"rooms": {"invite": {"!inv:example.com": {"invite_state": {"events": [
+        {"type": "m.room.name", "state_key": "", "sender": "@carol:example.com", "content": {"name": "Приглашение"}},
+        {"type": "m.room.encryption", "state_key": "", "sender": "@carol:example.com", "content": {"algorithm": "m.megolm.v1.aes-sha2"}},
+        {"type": "m.room.member", "state_key": "@alice:example.com", "sender": "@carol:example.com", "content": {"membership": "invite"}}
+    ]}}}}})"));
+    const auto& invite = state.Invites.at("!inv:example.com");
+    Expect(invite.Name == "Приглашение" && invite.Inviter == "@carol:example.com" && invite.Encrypted, "invite from stripped state");
+    state.Apply(TJson::Parse(R"({"rooms": {"join": {"!inv:example.com": {"timeline": {"events": []}}}}})"));
+    Expect(state.Invites.empty() && state.Rooms.count("!inv:example.com"), "joining moves the invite to the rooms");
+
     state.Apply(TJson::Parse(R"({"next_batch": "s3", "rooms": {"leave": {"!secret:example.com": {"timeline": {"events": []}}}}})"));
     Expect(state.Rooms.count("!secret:example.com") == 0, "left room is dropped");
     Expect(state.Rooms.count("!726s6s6q:example.com") == 1, "other rooms stay");

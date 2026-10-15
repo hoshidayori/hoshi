@@ -16,9 +16,26 @@ NSString* ToNs(const std::string& s) {
 
 } // namespace
 
+// Invites, when there are any, come in a section above the rooms
 @implementation RoomsViewController {
     HSSession* _session;
+    std::vector<std::string> _inviteIds;
     std::vector<std::string> _roomIds;
+}
+
+- (BOOL)isInviteSection:(NSInteger)section {
+    return !_inviteIds.empty() && section == 0;
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView*)tableView {
+    return _inviteIds.empty() ? 1 : 2;
+}
+
+- (NSString*)tableView:(UITableView*)tableView titleForHeaderInSection:(NSInteger)section {
+    if (_inviteIds.empty()) {
+        return nil;
+    }
+    return [self isInviteSection:section] ? @"Invites" : @"Rooms";
 }
 
 - (instancetype)initWithSession:(HSSession*)session {
@@ -54,6 +71,10 @@ NSString* ToNs(const std::string& s) {
 }
 
 - (void)stateChanged {
+    _inviteIds.clear();
+    for (const auto& [id, invite] : _session.state.Invites) {
+        _inviteIds.push_back(id);
+    }
     _roomIds.clear();
     for (const auto& [id, room] : _session.state.Rooms) {
         _roomIds.push_back(id);
@@ -71,11 +92,21 @@ NSString* ToNs(const std::string& s) {
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
-    return static_cast<NSInteger>(_roomIds.size());
+    return static_cast<NSInteger>([self isInviteSection:section] ? _inviteIds.size() : _roomIds.size());
 }
 
 - (UITableViewCell*)tableView:(UITableView*)tableView cellForRowAtIndexPath:(NSIndexPath*)indexPath {
     UITableViewCell* cell = [tableView dequeueReusableCellWithIdentifier:@"room" forIndexPath:indexPath];
+    if ([self isInviteSection:indexPath.section]) {
+        const auto& invite = _session.state.Invites.at(_inviteIds[static_cast<size_t>(indexPath.row)]);
+        UIListContentConfiguration* content = UIListContentConfiguration.subtitleCellConfiguration;
+        content.text = invite.Name.empty() ? ToNs(invite.RoomId) : ToNs(invite.Name);
+        content.secondaryText = [NSString stringWithFormat:@"Invited by %@", ToNs(invite.Inviter)];
+        content.image = [UIImage systemImageNamed:invite.Encrypted ? @"lock.fill" : @"envelope"];
+        cell.contentConfiguration = content;
+        cell.accessoryType = UITableViewCellAccessoryNone;
+        return cell;
+    }
     const auto& room = _session.state.Rooms.at(_roomIds[static_cast<size_t>(indexPath.row)]);
     UIListContentConfiguration* content = UIListContentConfiguration.subtitleCellConfiguration;
     content.text = room.Name.empty() ? ToNs(room.Id) : ToNs(room.Name);
@@ -95,6 +126,29 @@ NSString* ToNs(const std::string& s) {
 
 - (void)tableView:(UITableView*)tableView didSelectRowAtIndexPath:(NSIndexPath*)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    if ([self isInviteSection:indexPath.section]) {
+        const std::string roomId = _inviteIds[static_cast<size_t>(indexPath.row)];
+        const auto& invite = _session.state.Invites.at(roomId);
+        UIAlertController* sheet = [UIAlertController alertControllerWithTitle:invite.Name.empty() ? ToNs(roomId) : ToNs(invite.Name)
+            message:[NSString stringWithFormat:@"Invited by %@", ToNs(invite.Inviter)] preferredStyle:UIAlertControllerStyleActionSheet];
+        void (^report)(NSString*) = ^(NSString* error) {
+            if (error) {
+                UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Failed" message:error
+                                                                        preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+            }
+        };
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Join" style:UIAlertActionStyleDefault handler:^(UIAlertAction*) {
+            [self->_session joinRoom:roomId completion:report];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Decline" style:UIAlertActionStyleDestructive handler:^(UIAlertAction*) {
+            [self->_session declineInvite:roomId completion:report];
+        }]];
+        [sheet addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:sheet animated:YES completion:nil];
+        return;
+    }
     TimelineViewController* timeline = [[TimelineViewController alloc] initWithSession:_session
                                                                                 roomId:_roomIds[static_cast<size_t>(indexPath.row)]];
     [self.navigationController pushViewController:timeline animated:YES];

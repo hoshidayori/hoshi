@@ -44,10 +44,19 @@ struct TRoom {
     std::set<std::string> Members;
 };
 
+// A room the user is invited to, from the stripped state the invite carries
+struct TInvite {
+    std::string RoomId;
+    std::string Name;
+    std::string Inviter;
+    bool Encrypted = false;
+};
+
 // The part of a /sync response the client keeps. Rooms are keyed by room id.
 struct TSyncState {
     std::string NextBatch;
     std::map<std::string, TRoom> Rooms;
+    std::map<std::string, TInvite> Invites;  // an invite goes away once the room is joined or left
 
     // Applies one /sync response: drops left rooms, updates names and encryption from state, appends new
     // timeline messages.
