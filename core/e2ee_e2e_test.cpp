@@ -1,9 +1,11 @@
 // End-to-end encryption between two Hoshi devices on the local test Synapse: device keys, key query and
-// claim, an Olm-encrypted m.room_key over /sendToDevice, and a Megolm-encrypted room message.
+// claim, an Olm-encrypted m.room_key over /sendToDevice, a Megolm-encrypted room message, and SAS verification
+// of the two devices.
 // Run from synapse/data like e2e_test.
 #include "client.h"
 #include "e2ee.h"
 #include "unix_http.h"
+#include "verification.h"
 
 #include <chrono>
 #include <cstdio>
@@ -135,6 +137,89 @@ int main() {
         const auto mine = aliceMachine.DecryptRoomEvent(roomId, own);
         Expect(mine && (*mine)["content"].StringOr("body") == secret, "alice reads her own message");
         Expect(!bobMachine.DecryptRoomEvent("!other:localhost", own), "a key is bound to its room");
+
+        // Device verification through the server, with the to-device messages in clear as the app sends them
+        {
+            const std::int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            std::optional<TDevice> aliceDevice;
+            for (const auto& device : DevicesFromQuery(bob.QueryKeys({alice.UserId()}))) {
+                if (device.DeviceId == alice.DeviceId()) {
+                    aliceDevice = device;
+                }
+            }
+            Expect(aliceDevice.has_value(), "bob sees alice's device keys");
+            const NVerification::TIdentity aliceId{alice.UserId(), alice.DeviceId(), aliceMachine.Account().FingerprintKey()};
+            const NVerification::TIdentity bobId{bob.UserId(), bob.DeviceId(), bobMachine.Account().FingerprintKey()};
+            std::string aliceSince = alice.FetchSync({}, 0).StringOr("next_batch");
+
+            auto send = [](TClient& from, NVerification::TVerification& verification, const TDevice& to) {
+                for (const auto& message : verification.TakeOutgoing()) {
+                    from.SendToDevice(message.Type, TJson(TJson::TObject{{to.UserId, TJson::TObject{{to.DeviceId, message.Content}}}}),
+                        Unique("verify"));
+                }
+            };
+            auto receive = [](TClient& client, std::string& since) {
+                std::vector<TJson> events;
+                const TJson sync = client.FetchSync(since, 1000);
+                since = sync.StringOr("next_batch");
+                if (sync["to_device"]["events"].IsArray()) {
+                    for (const auto& event : sync["to_device"]["events"].AsArray()) {
+                        if (event.StringOr("type").rfind("m.key.verification.", 0) == 0) {
+                            events.push_back(event);
+                        }
+                    }
+                }
+                return events;
+            };
+
+            NVerification::TVerification a = NVerification::TVerification::Request(aliceId, *bobDevice, Unique("verify"), now);
+            send(alice, a, *bobDevice);
+            std::optional<NVerification::TVerification> b;
+            for (int i = 0; i < 5 && !b; ++i) {
+                for (const auto& event : receive(bob, since)) {
+                    if (event.StringOr("type") == "m.key.verification.request" && aliceDevice) {
+                        b = NVerification::TVerification::FromRequest(bobId, *aliceDevice, event["content"], now + 1000);
+                    }
+                }
+            }
+            Expect(b.has_value(), "bob gets the verification request");
+            if (b && aliceDevice) {
+                b->AcceptRequest();
+                send(bob, *b, *aliceDevice);
+                bool started = false;
+                bool confirmed = false;
+                for (int i = 0; i < 12 && !(a.State() == NVerification::EState::Done && b->State() == NVerification::EState::Done); ++i) {
+                    for (const auto& event : receive(alice, aliceSince)) {
+                        a.Receive(event.StringOr("type"), event["content"], event.StringOr("sender"));
+                    }
+                    if (a.State() == NVerification::EState::Ready && !started) {
+                        a.StartSas();
+                        started = true;
+                    }
+                    send(alice, a, *bobDevice);
+                    for (const auto& event : receive(bob, since)) {
+                        b->Receive(event.StringOr("type"), event["content"], event.StringOr("sender"));
+                    }
+                    if (a.State() == NVerification::EState::ShowingSas && b->State() == NVerification::EState::ShowingSas && !confirmed) {
+                        const auto x = a.Emoji();
+                        const auto y = b->Emoji();
+                        bool same = true;
+                        for (size_t k = 0; k < x.size(); ++k) {
+                            same = same && std::string(x[k].Symbol) == y[k].Symbol;
+                        }
+                        Expect(same, "both devices show the same emoji");
+                        a.ConfirmSas();
+                        b->ConfirmSas();
+                        confirmed = true;
+                        send(alice, a, *bobDevice);
+                    }
+                    send(bob, *b, *aliceDevice);
+                }
+                Expect(a.State() == NVerification::EState::Done && b->State() == NVerification::EState::Done,
+                    "both devices verified each other through the server");
+            }
+        }
 
         bob.LeaveRoom(roomId);
         alice.LeaveRoom(roomId);

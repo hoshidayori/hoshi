@@ -75,6 +75,19 @@ struct TWorker {
 
 NSNotificationName const HSSessionStateDidChange = @"HSSessionStateDidChange";
 NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAuthorization";
+NSNotificationName const HSSessionVerificationDidChange = @"HSSessionVerificationDidChange";
+
+namespace {
+
+bool IsVerificationEvent(const std::string& type) {
+    return type.rfind("m.key.verification.", 0) == 0;
+}
+
+std::int64_t NowMs() {
+    return static_cast<std::int64_t>(NSDate.date.timeIntervalSince1970 * 1000);
+}
+
+} // namespace
 
 @implementation HSSession {
     NSString* _homeserver;
@@ -91,6 +104,10 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
     std::mutex _cryptoMutex;
     std::optional<NHoshi::NE2ee::TMachine> _machine;
     std::atomic<bool> _uploadingKeys;
+    std::optional<NHoshi::NVerification::TVerification> _verificationCore;  // under _cryptoMutex
+    std::uint64_t _verificationVersion;                                    // under _cryptoMutex
+    std::optional<NHoshi::NVerification::TVerification> _verification;      // main-queue copy
+    std::uint64_t _verificationShown;                                      // main queue: the version of that copy
 
     NHoshi::TSyncState _state;  // main-queue copy for the screens
     std::string _deviceId;      // main queue only
@@ -286,12 +303,17 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
         if (ok) {
             std::shared_ptr<NHoshi::TSyncState> snapshot;
             int oneTimeKeysLeft = OneTimeKeyTarget;
+            std::vector<NHoshi::TJson> verificationEvents;
             {
                 std::lock_guard cryptoLock(strongSelf->_cryptoMutex);
                 bool cryptoChanged = false;
                 // Room keys come as to-device messages; take them before the timeline, so its messages decrypt at once
                 if (strongSelf->_machine && response["to_device"]["events"].IsArray()) {
                     for (const auto& event : response["to_device"]["events"].AsArray()) {
+                        if (IsVerificationEvent(event.StringOr("type"))) {
+                            verificationEvents.push_back(event);
+                            continue;
+                        }
                         cryptoChanged = strongSelf->_machine->ReceiveToDevice(event) || cryptoChanged;
                     }
                     // A pre-key message uses up one of our one-time keys even when it carries something else
@@ -312,6 +334,9 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
                 snapshot = std::make_shared<NHoshi::TSyncState>(strongSelf->_core);
             }
             [strongSelf publish:snapshot];
+            for (const auto& event : verificationEvents) {
+                [strongSelf handleVerificationEvent:event];
+            }
             // Keep enough one-time keys on the server for other devices to start sessions with us
             if (oneTimeKeysLeft < OneTimeKeyTarget / 2) {
                 const int missing = OneTimeKeyTarget - oneTimeKeysLeft;
@@ -516,6 +541,196 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
             snapshot = std::make_shared<NHoshi::TSyncState>(self->_core);
         }
         [self publish:snapshot];
+    });
+}
+
+#pragma mark - Device verification
+
+- (const std::optional<NHoshi::NVerification::TVerification>&)verification {
+    return _verification;
+}
+
+// Runs with _cryptoMutex held
+- (NHoshi::NVerification::TIdentity)identityLocked {
+    return {_machine->UserId(), _machine->DeviceId(), _machine->Account().FingerprintKey()};
+}
+
+static bool IsActive(const std::optional<NHoshi::NVerification::TVerification>& verification) {
+    using NHoshi::NVerification::EState;
+    return verification && verification->State() != EState::Done && verification->State() != EState::Cancelled;
+}
+
+// Applies a change to the verification in progress, sends what it wants to send, records a verified device
+// and tells the screens. Takes _cryptoMutex.
+- (void)changeVerification:(void (^)(NHoshi::NVerification::TVerification& verification))change {
+    std::vector<NHoshi::NVerification::TOutgoing> outgoing;
+    std::optional<NHoshi::NVerification::TVerification> snapshot;
+    std::uint64_t version = 0;
+    {
+        std::lock_guard lock(_cryptoMutex);
+        if (!_verificationCore || !_machine) {
+            return;
+        }
+        change(*_verificationCore);
+        outgoing = _verificationCore->TakeOutgoing();
+        if (_verificationCore->State() == NHoshi::NVerification::EState::Done && !_machine->IsVerified(_verificationCore->Them())) {
+            _machine->MarkVerified(_verificationCore->Them());
+            SaveMachine(*_machine);
+        }
+        snapshot = _verificationCore;
+        version = ++_verificationVersion;
+    }
+    [self sendVerificationMessages:std::move(outgoing) to:snapshot->Them()];
+    // From a button on the main queue, at once, so a screen opened right after it shows the new state. A copy
+    // from another queue that arrives later but is older is dropped.
+    void (^show)(HSSession*) = ^(HSSession* session) {
+        if (version > session->_verificationShown) {
+            session->_verificationShown = version;
+            session->_verification = snapshot;
+            [NSNotificationCenter.defaultCenter postNotificationName:HSSessionVerificationDidChange object:session];
+        }
+    };
+    if (NSThread.isMainThread) {
+        show(self);
+        return;
+    }
+    __weak HSSession* weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (HSSession* strongSelf = weakSelf) {
+            show(strongSelf);
+        }
+    });
+}
+
+// In order, on the send queue. Verification messages go unencrypted, as the spec allows for to-device ones:
+// the MACs, not secrecy, protect the outcome.
+- (void)sendVerificationMessages:(std::vector<NHoshi::NVerification::TOutgoing>)messages to:(const NHoshi::NE2ee::TDevice&)device {
+    if (messages.empty()) {
+        return;
+    }
+    const auto them = device;
+    auto queued = std::make_shared<std::vector<NHoshi::NVerification::TOutgoing>>(std::move(messages));
+    dispatch_async(_send->Queue, ^{
+        for (const auto& message : *queued) {
+            const NHoshi::TJson body(NHoshi::TJson::TObject{
+                {them.UserId, NHoshi::TJson::TObject{{them.DeviceId, message.Content}}},
+            });
+            try {
+                self->_send->Client->SendToDevice(message.Type, body, NSUUID.UUID.UUIDString.UTF8String);
+            } catch (const NHoshi::TMatrixError& e) {
+                NSLog(@"Hoshi: could not send %s: %s", message.Type.c_str(), e.what());
+            }
+        }
+    });
+}
+
+// Runs on the sync queue, outside the locks
+- (void)handleVerificationEvent:(const NHoshi::TJson&)event {
+    const std::string type = event.StringOr("type");
+    const std::string sender = event.StringOr("sender");
+    const NHoshi::TJson& content = event["content"];
+    if (type != "m.key.verification.request") {
+        [self changeVerification:^(NHoshi::NVerification::TVerification& verification) {
+            verification.Receive(type, content, sender);
+        }];
+        return;
+    }
+    // The keys the server has for the asking device: the verification checks them
+    std::optional<NHoshi::NE2ee::TDevice> them;
+    try {
+        for (const auto& device : NHoshi::NE2ee::DevicesFromQuery(_sync->Client->QueryKeys({sender}))) {
+            if (device.UserId == sender && device.DeviceId == content.StringOr("from_device")) {
+                them = device;
+            }
+        }
+    } catch (const NHoshi::TMatrixError& e) {
+        NSLog(@"Hoshi: no keys for the verification request: %s", e.what());
+    }
+    if (!them) {
+        return;
+    }
+    {
+        std::lock_guard lock(_cryptoMutex);
+        if (!_machine || IsActive(_verificationCore)) {
+            return;  // one at a time; the other side times out
+        }
+        auto request = NHoshi::NVerification::TVerification::FromRequest([self identityLocked], *them, content, NowMs());
+        if (!request) {
+            return;
+        }
+        _verificationCore = std::move(request);
+    }
+    [self changeVerification:^(NHoshi::NVerification::TVerification&) {}];
+}
+
+- (void)requestVerificationOfDevice:(const NHoshi::NE2ee::TDevice&)device {
+    std::vector<NHoshi::NVerification::TOutgoing> cancel;
+    NHoshi::NE2ee::TDevice previous;
+    {
+        std::lock_guard lock(_cryptoMutex);
+        if (!_machine) {
+            return;
+        }
+        if (IsActive(_verificationCore)) {
+            _verificationCore->Cancel("m.user", "Replaced by another verification");
+            cancel = _verificationCore->TakeOutgoing();
+            previous = _verificationCore->Them();
+        }
+        _verificationCore = NHoshi::NVerification::TVerification::Request([self identityLocked], device,
+            NSUUID.UUID.UUIDString.UTF8String, NowMs());
+    }
+    [self sendVerificationMessages:std::move(cancel) to:previous];
+    [self changeVerification:^(NHoshi::NVerification::TVerification&) {}];
+}
+
+- (void)acceptVerification {
+    [self changeVerification:^(NHoshi::NVerification::TVerification& verification) {
+        verification.AcceptRequest();
+    }];
+}
+
+- (void)startEmojiVerification {
+    [self changeVerification:^(NHoshi::NVerification::TVerification& verification) {
+        verification.StartSas();
+    }];
+}
+
+- (void)confirmEmoji {
+    [self changeVerification:^(NHoshi::NVerification::TVerification& verification) {
+        verification.ConfirmSas();
+    }];
+}
+
+- (void)cancelVerificationBecauseOfMismatch:(BOOL)mismatch {
+    [self changeVerification:^(NHoshi::NVerification::TVerification& verification) {
+        if (mismatch) {
+            verification.Cancel("m.mismatched_sas", "The emoji did not match");
+        } else {
+            verification.Cancel("m.user", "Cancelled by the user");
+        }
+    }];
+}
+
+- (void)fetchDevicesOfUser:(NSString*)userId completion:(void (^)(std::vector<HSDevice>, NSString*))completion {
+    const std::string user = userId.UTF8String;
+    dispatch_async(_send->Queue, ^{
+        std::vector<HSDevice> devices;
+        NSString* error = nil;
+        try {
+            const auto found = NHoshi::NE2ee::DevicesFromQuery(self->_send->Client->QueryKeys({user}));
+            std::lock_guard lock(self->_cryptoMutex);
+            for (const auto& device : found) {
+                if (self->_machine && device.UserId == self->_machine->UserId() && device.DeviceId == self->_machine->DeviceId()) {
+                    continue;
+                }
+                devices.push_back({device, self->_machine && self->_machine->IsVerified(device)});
+            }
+        } catch (const NHoshi::TMatrixError& e) {
+            error = Describe(e);
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(devices, error);
+        });
     });
 }
 

@@ -65,11 +65,13 @@ if(HOSHI_IOS)
         app/main.mm
         app/AppRouter.mm
         app/Credentials.mm
+        app/DevicesViewController.mm
         app/LoginViewController.mm
         app/RoomsViewController.mm
         app/TimelineViewController.mm
         app/Session.mm
         app/UrlSessionHttp.mm
+        app/VerificationViewController.mm
     )
     target_include_directories(Hoshi PRIVATE app)
     target_link_libraries(Hoshi PRIVATE "-framework Security")

@@ -1,7 +1,9 @@
 #import "RoomsViewController.h"
 #import "AppRouter.h"
+#import "DevicesViewController.h"
 #import "Session.h"
 #import "TimelineViewController.h"
+#import "VerificationViewController.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -51,9 +53,26 @@ NSString* ToNs(const std::string& s) {
     self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Sign out" style:UIBarButtonItemStylePlain
                                                                              target:self action:@selector(signOut)];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"room"];
+    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Devices" style:UIBarButtonItemStylePlain
+                                                                            target:self action:@selector(showDevices)];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(stateChanged)
                                                name:HSSessionStateDidChange object:_session];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(verificationChanged)
+                                               name:HSSessionVerificationDidChange object:_session];
     [self stateChanged];
+}
+
+- (void)showDevices {
+    [self.navigationController pushViewController:[[DevicesViewController alloc] initWithSession:_session] animated:YES];
+}
+
+// Another device asks to verify this one: show the request over whatever screen is open
+- (void)verificationChanged {
+    const auto& verification = _session.verification;
+    UIViewController* top = self.navigationController ?: self;
+    if (verification && verification->State() == NHoshi::NVerification::EState::Requested && !top.presentedViewController) {
+        [top presentViewController:[[VerificationViewController alloc] initWithSession:_session] animated:YES completion:nil];
+    }
 }
 
 - (void)signOut {

@@ -1,14 +1,25 @@
 #import <Foundation/Foundation.h>
 
 #include "sync.h"
+#include "verification.h"
 
+#include <optional>
 #include <string>
+#include <vector>
 
 @class HSCredentials;
 
 extern NSNotificationName const HSSessionStateDidChange;
 // Posted on the main queue when the server rejects the access token (M_UNKNOWN_TOKEN): the user must sign in again
 extern NSNotificationName const HSSessionDidLoseAuthorization;
+// Posted on the main queue when a device verification starts, moves on or ends
+extern NSNotificationName const HSSessionVerificationDidChange;
+
+// A device from /keys/query and whether this device has verified it
+struct HSDevice {
+    NHoshi::NE2ee::TDevice Device;
+    bool Verified = false;
+};
 
 // Owns the Matrix client. All network calls run on serial queues, because TClient is not
 // thread-safe; results come back on the main queue.
@@ -44,6 +55,19 @@ extern NSNotificationName const HSSessionDidLoseAuthorization;
 - (void)sendText:(NSString*)text toRoom:(const std::string&)roomId;
 // Sends a failed message again with its original transaction id
 - (void)retryMessage:(const std::string&)txnId inRoom:(const std::string&)roomId;
+
+// Device verification with emoji (m.sas.v1 over to-device messages), one at a time. A request from another
+// device starts one too. The latest copy is read on the main queue only.
+- (const std::optional<NHoshi::NVerification::TVerification>&)verification;
+- (void)requestVerificationOfDevice:(const NHoshi::NE2ee::TDevice&)device;
+- (void)acceptVerification;
+- (void)startEmojiVerification;
+- (void)confirmEmoji;
+// mismatch: the emoji differ, which may mean an attack; otherwise the user just stopped
+- (void)cancelVerificationBecauseOfMismatch:(BOOL)mismatch;
+
+// The user's devices other than this one
+- (void)fetchDevicesOfUser:(NSString*)userId completion:(void (^)(std::vector<HSDevice> devices, NSString* error))completion;
 
 @property (nonatomic, readonly) NSString* userId;
 
