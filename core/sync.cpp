@@ -15,6 +15,14 @@ void ApplyStateEvent(TRoom& room, const TJson& event) {
         room.Name = event["content"].StringOr("name");
     } else if (type == "m.room.encryption") {
         room.Encrypted = true;
+        // A period of zero or less cannot be used, so the default stays
+        const TJson& content = event["content"];
+        if (content["rotation_period_ms"].IsInt() && content["rotation_period_ms"].AsInt() > 0) {
+            room.RotationPeriodMs = content["rotation_period_ms"].AsInt();
+        }
+        if (content["rotation_period_msgs"].IsInt() && content["rotation_period_msgs"].AsInt() > 0) {
+            room.RotationPeriodMsgs = content["rotation_period_msgs"].AsInt();
+        }
     } else if (type == "m.room.canonical_alias" && event["state_key"].IsString() && event["state_key"].AsString().empty()) {
         room.CanonicalAlias = event["content"].StringOr("alias");
     } else if (type == "m.room.member" && event["state_key"].IsString()) {

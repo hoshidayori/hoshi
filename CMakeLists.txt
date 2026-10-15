@@ -105,6 +105,11 @@ target_link_libraries(olm_test PRIVATE hoshi_crypto)
 target_compile_options(olm_test PRIVATE -Wall -Wextra -Werror)
 add_test(NAME olm_test COMMAND olm_test)
 
+add_executable(e2ee_test core/e2ee_test.cpp)
+target_link_libraries(e2ee_test PRIVATE hoshi_crypto hoshi_core)
+target_compile_options(e2ee_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME e2ee_test COMMAND e2ee_test)
+
 # Driven by interop/olm_interop.py
 add_executable(olm_tool core/olm_tool.cpp)
 target_link_libraries(olm_tool PRIVATE hoshi_crypto)

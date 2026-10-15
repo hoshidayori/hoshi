@@ -8,6 +8,7 @@
 #include "olm.h"
 #include "sync.h"
 
+#include <cstdint>
 #include <map>
 #include <optional>
 #include <set>
@@ -35,6 +36,12 @@ struct TDevice {
 // Devices with valid self-signatures from a /keys/query response; others are dropped
 std::vector<TDevice> DevicesFromQuery(const TJson& response);
 
+// When a room's outbound Megolm session is replaced, from m.room.encryption; the defaults are the spec's
+struct TRotation {
+    std::int64_t PeriodMs = 7 * 24 * 60 * 60 * 1000LL;  // rotation_period_ms
+    std::int64_t PeriodMsgs = 100;                     // rotation_period_msgs
+};
+
 // To-device messages for /sendToDevice: user -> device -> content
 using TToDevice = std::map<std::string, std::map<std::string, TJson>>;
 
@@ -51,6 +58,12 @@ public:
     // After the upload succeeded
     void MarkKeysAsPublished() { Account_.MarkKeysAsPublished(); }
 
+    // Before sending: replaces the room's outbound session with a new one when the old one is too old, has
+    // encrypted too many messages, or its key went to a device that is not among the room's devices any more
+    // (a member left, or a device was removed), so that device cannot read what comes next. Starts the session
+    // if the room has none. Returns true if a new session was started.
+    bool PrepareRoomKey(const std::string& roomId, const std::vector<TDevice>& devices, const TRotation& rotation,
+        std::int64_t nowMs);
     // Olm-encrypted m.room_key for each device, using one-time keys from a /keys/claim response.
     // Devices without a valid signed one-time key are skipped. Creates the room's outbound session if needed.
     // Devices that already got the room's current session key are skipped too.
@@ -81,6 +94,7 @@ private:
     // Megolm sessions for sending, by room, and the devices ("user|device") that got each one's key
     std::map<std::string, NMegolm::TOutboundSession> Outbound;
     std::map<std::string, std::set<std::string>> SharedWith;
+    std::map<std::string, std::int64_t> OutboundCreatedMs;
     // Megolm sessions for receiving, by (room, session id)
     std::map<std::pair<std::string, std::string>, NMegolm::TInboundSession> Inbound;
 };

@@ -432,18 +432,22 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
     [self sendPendingText:body room:roomId txnId:txnId];
 }
 
-// Runs on the send queue. Before the first message of the room's Megolm session, and whenever a member has a
-// device that has not got its key yet, the key goes to those devices over Olm; then the message is encrypted.
+// Runs on the send queue. The room's Megolm session is replaced when it is due (see PrepareRoomKey). Before the
+// first message of a session, and whenever a member has a device that has not got its key yet, the key goes to
+// those devices over Olm; then the message is encrypted.
 // Throws TMatrixError on network failures and std::runtime_error when there is no crypto state.
 - (std::string)sendEncryptedText:(const std::string&)text room:(const std::string&)room
-                         members:(const std::vector<std::string>&)members txnId:(const std::string&)txnId {
+                         members:(const std::vector<std::string>&)members rotation:(const NHoshi::NE2ee::TRotation&)rotation
+                           txnId:(const std::string&)txnId {
     const auto devices = NHoshi::NE2ee::DevicesFromQuery(_send->Client->QueryKeys(members));
+    const std::int64_t nowMs = static_cast<std::int64_t>(NSDate.date.timeIntervalSince1970 * 1000);
     NHoshi::TJson claimRequest;
     {
         std::lock_guard lock(_cryptoMutex);
         if (!_machine) {
             throw std::runtime_error("no crypto state");
         }
+        _machine->PrepareRoomKey(room, devices, rotation, nowMs);
         claimRequest = _machine->ClaimRequestFor(room, devices);
     }
     const NHoshi::TJson claimed = claimRequest.AsObject().empty() ? NHoshi::TJson(NHoshi::TJson::TObject{})
@@ -480,16 +484,18 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
         try {
             bool encrypted = false;
             std::vector<std::string> members;
+            NHoshi::NE2ee::TRotation rotation;
             {
                 std::lock_guard lock(self->_coreMutex);
                 const auto it = self->_core.Rooms.find(room);
                 if (it != self->_core.Rooms.end()) {
                     encrypted = it->second.Encrypted;
                     members.assign(it->second.Members.begin(), it->second.Members.end());
+                    rotation = {it->second.RotationPeriodMs, it->second.RotationPeriodMsgs};
                 }
             }
             if (encrypted) {
-                eventId = [self sendEncryptedText:text room:room members:members txnId:txn];
+                eventId = [self sendEncryptedText:text room:room members:members rotation:rotation txnId:txn];
             } else {
                 eventId = self->_send->Client->SendText(room, text, txn);
             }

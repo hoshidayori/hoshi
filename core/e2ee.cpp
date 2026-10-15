@@ -106,6 +106,39 @@ TJson TMachine::KeysUploadBody(size_t newOneTimeKeys, bool withDeviceKeys) {
     return TJson(std::move(body));
 }
 
+bool TMachine::PrepareRoomKey(const std::string& roomId, const std::vector<TDevice>& devices, const TRotation& rotation,
+    std::int64_t nowMs)
+{
+    const auto outbound = Outbound.find(roomId);
+    bool rotate = outbound == Outbound.end();
+    if (!rotate) {
+        // A session saved before creation times were kept counts from now
+        const std::int64_t created = OutboundCreatedMs.try_emplace(roomId, nowMs).first->second;
+        rotate = nowMs - created >= rotation.PeriodMs ||
+            static_cast<std::int64_t>(outbound->second.MessageIndex()) >= rotation.PeriodMsgs;
+    }
+    if (!rotate) {
+        std::set<std::string> current;
+        for (const auto& device : devices) {
+            current.insert(device.UserId + "|" + device.DeviceId);
+        }
+        for (const auto& device : SharedWith[roomId]) {
+            if (!current.count(device)) {
+                rotate = true;
+                break;
+            }
+        }
+    }
+    if (!rotate) {
+        return false;
+    }
+    // Our inbound copy of the old session stays, so the messages already sent can still be read
+    Outbound.insert_or_assign(roomId, NMegolm::TOutboundSession());
+    OutboundCreatedMs[roomId] = nowMs;
+    SharedWith.erase(roomId);
+    return true;
+}
+
 TToDevice TMachine::ShareRoomKey(const std::string& roomId, const std::vector<TDevice>& devices, const TJson& claimResponse) {
     auto outbound = Outbound.try_emplace(roomId).first;
     const NMegolm::TOutboundSession& session = outbound->second;
@@ -204,7 +237,11 @@ TJson TMachine::Save() const {
         if (const auto it = SharedWith.find(room); it != SharedWith.end()) {
             shared.assign(it->second.begin(), it->second.end());
         }
-        outbound[room] = TJson(TJson::TObject{{"session", session.Save()}, {"shared_with", TJson(std::move(shared))}});
+        TJson::TObject saved{{"session", session.Save()}, {"shared_with", TJson(std::move(shared))}};
+        if (const auto it = OutboundCreatedMs.find(room); it != OutboundCreatedMs.end()) {
+            saved["created_ms"] = it->second;
+        }
+        outbound[room] = TJson(std::move(saved));
     }
     TJson::TArray inbound;
     for (const auto& [id, session] : Inbound) {
@@ -242,6 +279,9 @@ std::optional<TMachine> TMachine::Load(const TJson& saved) {
         for (const auto& [room, json] : saved["outbound"].AsObject()) {
             if (auto session = NMegolm::TOutboundSession::Load(json["session"])) {
                 machine.Outbound.insert_or_assign(room, std::move(*session));
+                if (json["created_ms"].IsInt()) {
+                    machine.OutboundCreatedMs[room] = json["created_ms"].AsInt();
+                }
                 if (json["shared_with"].IsArray()) {
                     for (const auto& device : json["shared_with"].AsArray()) {
                         if (device.IsString()) {

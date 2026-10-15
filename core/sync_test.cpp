@@ -44,7 +44,7 @@ const char* FirstSync = R"({
       "!secret:example.com": {
         "timeline": {"events": [
           {"type": "m.room.encryption", "state_key": "", "sender": "@alice:example.com", "event_id": "$enc",
-           "content": {"algorithm": "m.megolm.v1.aes-sha2"}},
+           "content": {"algorithm": "m.megolm.v1.aes-sha2", "rotation_period_msgs": 50, "rotation_period_ms": 0}},
           {"type": "m.room.encrypted", "sender": "@alice:example.com", "event_id": "$cipher",
            "content": {"algorithm": "m.megolm.v1.aes-sha2", "ciphertext": "AwgA..."}}
         ]}
@@ -84,6 +84,8 @@ int main() {
 
     const TRoom& secret = state.Rooms.at("!secret:example.com");
     Expect(secret.Encrypted, "encryption seen in timeline state event");
+    Expect(secret.RotationPeriodMsgs == 50 && secret.RotationPeriodMs == 7 * 24 * 60 * 60 * 1000LL,
+        "rotation periods from m.room.encryption, an unusable zero keeps the default");
     Expect(secret.Timeline.size() == 1 && secret.Timeline[0].IsWaitingForKey() && secret.Timeline[0].EventId == "$cipher",
         "an encrypted event waits in the timeline for its key");
 

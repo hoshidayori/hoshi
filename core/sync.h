@@ -34,6 +34,9 @@ struct TRoom {
     std::string Id;
     std::string Name;      // from m.room.name, empty if the room has none
     bool Encrypted = false;  // m.room.encryption was seen; the timeline then has m.room.encrypted events
+    // From m.room.encryption: how long and for how many messages one outbound Megolm session is used
+    std::int64_t RotationPeriodMs = 7 * 24 * 60 * 60 * 1000LL;
+    std::int64_t RotationPeriodMsgs = 100;
     std::vector<TMessage> Timeline;
     bool Limited = false;    // the server skipped older events; prev_batch fetches them
     std::string PrevBatch;   // token for /messages?dir=b to fetch what comes before Timeline.front()
