@@ -1,4 +1,5 @@
 #import "RoomsViewController.h"
+#import "AppRouter.h"
 #import "Session.h"
 #import "TimelineViewController.h"
 
@@ -30,10 +31,22 @@ NSString* ToNs(const std::string& s) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Rooms";
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithTitle:@"Sign out" style:UIBarButtonItemStylePlain
+                                                                             target:self action:@selector(signOut)];
     [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"room"];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(stateChanged)
                                                name:HSSessionStateDidChange object:_session];
     [self stateChanged];
+}
+
+- (void)signOut {
+    UIAlertController* confirm = [UIAlertController alertControllerWithTitle:@"Sign out?"
+        message:@"This device will forget the account and stop receiving messages." preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Sign out" style:UIAlertActionStyleDestructive handler:^(UIAlertAction*) {
+        [HSAppRouter.shared signOut];
+    }]];
+    [self presentViewController:confirm animated:YES completion:nil];
 }
 
 - (void)dealloc {

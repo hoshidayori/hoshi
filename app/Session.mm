@@ -1,9 +1,11 @@
 #import "Session.h"
+#import "Credentials.h"
 
 #include "UrlSessionHttp.h"
 #include "client.h"
 
 #include <atomic>
+#include <functional>
 #include <memory>
 
 namespace {
@@ -22,8 +24,10 @@ NSString* Describe(const NHoshi::TMatrixError& e) {
 } // namespace
 
 NSNotificationName const HSSessionStateDidChange = @"HSSessionStateDidChange";
+NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAuthorization";
 
 @implementation HSSession {
+    NSString* _homeserver;
     // Sync long-polls for up to 30 s, so sending has its own client and queue and never waits behind it
     dispatch_queue_t _queue;
     std::unique_ptr<NHoshi::TClient> _client;
@@ -31,10 +35,13 @@ NSNotificationName const HSSessionStateDidChange = @"HSSessionStateDidChange";
     std::unique_ptr<NHoshi::TClient> _sendClient;
     std::shared_ptr<std::atomic<bool>> _syncing;
     NHoshi::TSyncState _state;  // main queue only
+    std::string _deviceId;     // main queue only
+    std::string _accessToken;  // main queue only
 }
 
 - (instancetype)initWithHomeserver:(NSString*)homeserver {
     if ((self = [super init])) {
+        _homeserver = [homeserver copy];
         auto http = std::make_shared<NHoshi::TUrlSessionHttp>();
         _queue = dispatch_queue_create("hoshi.sync", DISPATCH_QUEUE_SERIAL);
         _client = std::make_unique<NHoshi::TClient>(http, homeserver.UTF8String);
@@ -43,6 +50,27 @@ NSNotificationName const HSSessionStateDidChange = @"HSSessionStateDidChange";
         _syncing = std::make_shared<std::atomic<bool>>(false);
     }
     return self;
+}
+
+- (instancetype)initWithCredentials:(HSCredentials*)credentials {
+    if ((self = [self initWithHomeserver:credentials.homeserver])) {
+        _userId = [credentials.userId copy];
+        _deviceId = credentials.deviceId.UTF8String;
+        _accessToken = credentials.accessToken.UTF8String;
+        // Nothing else uses the clients yet, so they can be set up here directly
+        _client->Restore(_userId.UTF8String, _deviceId, _accessToken);
+        _sendClient->Restore(_userId.UTF8String, _deviceId, _accessToken);
+    }
+    return self;
+}
+
+- (HSCredentials*)credentials {
+    HSCredentials* credentials = [[HSCredentials alloc] init];
+    credentials.homeserver = _homeserver;
+    credentials.userId = _userId;
+    credentials.deviceId = ToNs(_deviceId);
+    credentials.accessToken = ToNs(_accessToken);
+    return credentials;
 }
 
 - (void)loginUser:(NSString*)user password:(NSString*)password completion:(void (^)(NSString*))completion {
@@ -55,17 +83,31 @@ NSNotificationName const HSSessionStateDidChange = @"HSSessionStateDidChange";
         } catch (const NHoshi::TMatrixError& e) {
             error = Describe(e);
         }
-        NSString* userId = ToNs(self->_client->UserId());
-        std::string id = self->_client->UserId();
-        std::string device = self->_client->DeviceId();
-        std::string token = self->_client->AccessToken();
+        const std::string id = self->_client->UserId();
+        const std::string device = self->_client->DeviceId();
+        const std::string token = self->_client->AccessToken();
         dispatch_sync(self->_sendQueue, ^{
             self->_sendClient->Restore(id, device, token);
         });
         dispatch_async(dispatch_get_main_queue(), ^{
-            self->_userId = userId;
+            self->_userId = ToNs(id);
+            self->_deviceId = device;
+            self->_accessToken = token;
             completion(error);
         });
+    });
+}
+
+- (void)logoutWithCompletion:(void (^)(void))completion {
+    [self stopSyncing];
+    // The send queue is idle between messages, unlike the sync queue that may wait in a long poll
+    dispatch_async(_sendQueue, ^{
+        try {
+            self->_sendClient->Logout();
+        } catch (const NHoshi::TMatrixError&) {
+            // Offline: the token stays valid on the server, but it is forgotten on this device
+        }
+        dispatch_async(dispatch_get_main_queue(), completion);
     });
 }
 
@@ -96,10 +138,19 @@ NSNotificationName const HSSessionStateDidChange = @"HSSessionStateDidChange";
             return;
         }
         bool ok = true;
+        bool unauthorized = false;
         try {
             strongSelf->_client->Sync(30000);
-        } catch (const NHoshi::TMatrixError&) {
+        } catch (const NHoshi::TMatrixError& e) {
             ok = false;
+            unauthorized = e.ErrCode == "M_UNKNOWN_TOKEN";
+        }
+        if (unauthorized) {
+            *syncing = false;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [NSNotificationCenter.defaultCenter postNotificationName:HSSessionDidLoseAuthorization object:weakSelf];
+            });
+            return;
         }
         auto snapshot = std::make_shared<NHoshi::TSyncState>(strongSelf->_client->State());
         dispatch_async(dispatch_get_main_queue(), ^{

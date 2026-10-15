@@ -1,5 +1,5 @@
 #import "LoginViewController.h"
-#import "RoomsViewController.h"
+#import "AppRouter.h"
 #import "Session.h"
 
 @implementation LoginViewController {
@@ -47,6 +47,7 @@
     _error.textColor = UIColor.systemRedColor;
     _error.numberOfLines = 0;
     _error.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    _error.text = self.message;
 
     UIStackView* stack = [[UIStackView alloc] initWithArrangedSubviews:@[_homeserver, _user, _password, _login, _error]];
     stack.axis = UILayoutConstraintAxisVertical;
@@ -76,9 +77,7 @@
             self->_error.text = error;
             return;
         }
-        [self->_session startSyncing];
-        RoomsViewController* rooms = [[RoomsViewController alloc] initWithSession:self->_session];
-        [self.navigationController setViewControllers:@[rooms] animated:YES];
+        [HSAppRouter.shared didSignIn:self->_session];
     }];
 }
 

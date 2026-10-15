@@ -97,6 +97,17 @@ int main() {
         Expect(e.Status == 0, "transport failure status");
     }
 
+    http->Responses.push_back({200, "{}"});
+    client.Logout();
+    Expect(http->Requests.back().Url == "https://example.com/_matrix/client/v3/logout", "logout url");
+    Expect(http->Requests.back().AccessToken == "syt_secret", "logout sends the token it invalidates");
+    Expect(client.AccessToken().empty(), "token forgotten after logout");
+
+    client.Restore("@yuki:example.com", "HOSHI1", "syt_old");
+    http->Responses.push_back({401, R"({"errcode": "M_UNKNOWN_TOKEN", "error": "gone"})"});
+    client.Logout();
+    Expect(client.AccessToken().empty(), "logout with an already invalid token succeeds");
+
     if (Failures == 0) {
         std::printf("client_test: all passed\n");
     }

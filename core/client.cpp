@@ -71,6 +71,20 @@ void TClient::Restore(std::string userId, std::string deviceId, std::string acce
     AccessToken_ = std::move(accessToken);
 }
 
+void TClient::Logout() {
+    const TJson body(TJson::TObject{});
+    try {
+        Call("POST", "/_matrix/client/v3/logout", &body);
+    } catch (const TMatrixError& e) {
+        // An already invalid token is as good as logged out; other errors still forget the token locally
+        if (e.ErrCode != "M_UNKNOWN_TOKEN") {
+            AccessToken_.clear();
+            throw;
+        }
+    }
+    AccessToken_.clear();
+}
+
 void TClient::Sync(int timeoutMs) {
     std::string path = "/_matrix/client/v3/sync";
     if (!State_.NextBatch.empty()) {

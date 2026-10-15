@@ -50,6 +50,8 @@ public:
     void Login(const std::string& user, const std::string& password, const std::string& deviceName);
     // Uses a token saved from an earlier login
     void Restore(std::string userId, std::string deviceId, std::string accessToken);
+    // Invalidates the access token on the server and forgets it here
+    void Logout();
 
     // One /sync round; long-polls up to timeoutMs when there is a previous batch
     void Sync(int timeoutMs);
