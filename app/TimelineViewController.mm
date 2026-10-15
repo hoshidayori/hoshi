@@ -11,7 +11,7 @@ NSString* ToNs(const std::string& s) {
 
 } // namespace
 
-@interface TimelineViewController () <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
+@interface TimelineViewController () <UITableViewDataSource, UITableViewDelegate, UITextViewDelegate>
 @end
 
 @implementation TimelineViewController {
@@ -19,10 +19,18 @@ NSString* ToNs(const std::string& s) {
     std::string _roomId;
     std::vector<NHoshi::TMessage> _messages;
     UITableView* _table;
-    UITextField* _input;
+    // Composer: Return inserts a line break, the button sends; it grows up to MaxInputLines, then scrolls
+    UIView* _composer;
+    UITextView* _input;
+    UILabel* _placeholder;
+    UIButton* _send;
+    NSLayoutConstraint* _inputHeight;
+    UIButton* _toBottom;
     BOOL _hasOlder;
     BOOL _loadingOlder;
 }
+
+static const CGFloat MaxInputLines = 6;
 
 - (instancetype)initWithSession:(HSSession*)session roomId:(const std::string&)roomId {
     if ((self = [super initWithNibName:nil bundle:nil])) {
@@ -47,24 +55,84 @@ NSString* ToNs(const std::string& s) {
     [_table registerClass:[UITableViewCell class] forCellReuseIdentifier:@"message"];
     _table.translatesAutoresizingMaskIntoConstraints = NO;
 
-    _input = [[UITextField alloc] init];
-    _input.placeholder = @"Message";
-    _input.borderStyle = UITextBorderStyleRoundedRect;
-    _input.returnKeyType = UIReturnKeySend;
+    _composer = [[UIView alloc] init];
+    _composer.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _input = [[UITextView alloc] init];
+    _input.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    _input.adjustsFontForContentSizeCategory = YES;
+    _input.backgroundColor = UIColor.secondarySystemBackgroundColor;
+    _input.layer.cornerRadius = 18;
+    _input.textContainerInset = UIEdgeInsetsMake(8, 10, 8, 10);
+    _input.scrollEnabled = NO;
     _input.delegate = self;
     _input.translatesAutoresizingMaskIntoConstraints = NO;
 
+    _placeholder = [[UILabel alloc] init];
+    _placeholder.text = @"Message";
+    _placeholder.font = _input.font;
+    _placeholder.textColor = UIColor.placeholderTextColor;
+    _placeholder.translatesAutoresizingMaskIntoConstraints = NO;
+    [_input addSubview:_placeholder];
+
+    _send = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_send setImage:[UIImage systemImageNamed:@"arrow.up.circle.fill"
+                            withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:30]]
+           forState:UIControlStateNormal];
+    _send.accessibilityLabel = @"Send";
+    _send.enabled = NO;
+    [_send addTarget:self action:@selector(sendTapped) forControlEvents:UIControlEventTouchUpInside];
+    _send.translatesAutoresizingMaskIntoConstraints = NO;
+    [_send setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+
+    _toBottom = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIButtonConfiguration* toBottom = UIButtonConfiguration.filledButtonConfiguration;
+    toBottom.image = [UIImage systemImageNamed:@"chevron.down"];
+    toBottom.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+    toBottom.baseBackgroundColor = UIColor.secondarySystemBackgroundColor;
+    toBottom.baseForegroundColor = UIColor.labelColor;
+    _toBottom.configuration = toBottom;
+    _toBottom.accessibilityLabel = @"Jump to the latest message";
+    _toBottom.layer.shadowColor = UIColor.blackColor.CGColor;
+    _toBottom.layer.shadowOpacity = 0.15;
+    _toBottom.layer.shadowRadius = 4;
+    _toBottom.layer.shadowOffset = CGSizeMake(0, 1);
+    _toBottom.hidden = YES;
+    [_toBottom addTarget:self action:@selector(toBottomTapped) forControlEvents:UIControlEventTouchUpInside];
+    _toBottom.translatesAutoresizingMaskIntoConstraints = NO;
+
     [self.view addSubview:_table];
-    [self.view addSubview:_input];
+    [self.view addSubview:_composer];
+    [self.view addSubview:_toBottom];
+    [_composer addSubview:_input];
+    [_composer addSubview:_send];
     UILayoutGuide* safe = self.view.safeAreaLayoutGuide;
+    _inputHeight = [_input.heightAnchor constraintEqualToConstant:[self inputHeightForLines:1]];
     [NSLayoutConstraint activateConstraints:@[
         [_table.topAnchor constraintEqualToAnchor:self.view.topAnchor],
         [_table.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
         [_table.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [_input.topAnchor constraintEqualToAnchor:_table.bottomAnchor constant:8],
-        [_input.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
-        [_input.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-12],
-        [_input.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor constant:-8],
+        [_composer.topAnchor constraintEqualToAnchor:_table.bottomAnchor],
+        [_composer.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+        [_composer.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+        [_composer.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor],
+
+        [_input.topAnchor constraintEqualToAnchor:_composer.topAnchor constant:8],
+        [_input.bottomAnchor constraintEqualToAnchor:_composer.bottomAnchor constant:-8],
+        [_input.leadingAnchor constraintEqualToAnchor:_composer.leadingAnchor constant:12],
+        _inputHeight,
+        [_send.leadingAnchor constraintEqualToAnchor:_input.trailingAnchor constant:6],
+        [_send.trailingAnchor constraintEqualToAnchor:_composer.trailingAnchor constant:-10],
+        [_send.bottomAnchor constraintEqualToAnchor:_input.bottomAnchor],
+        [_send.heightAnchor constraintEqualToConstant:[self inputHeightForLines:1]],
+
+        [_placeholder.leadingAnchor constraintEqualToAnchor:_input.leadingAnchor constant:15],
+        [_placeholder.centerYAnchor constraintEqualToAnchor:_input.topAnchor constant:[self inputHeightForLines:1] / 2],
+
+        [_toBottom.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-16],
+        [_toBottom.bottomAnchor constraintEqualToAnchor:_composer.topAnchor constant:-12],
+        [_toBottom.widthAnchor constraintEqualToConstant:40],
+        [_toBottom.heightAnchor constraintEqualToConstant:40],
     ]];
 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(stateChanged)
@@ -74,6 +142,72 @@ NSString* ToNs(const std::string& s) {
 
 - (void)dealloc {
     [NSNotificationCenter.defaultCenter removeObserver:self];
+}
+
+- (CGFloat)inputHeightForLines:(CGFloat)lines {
+    return ceil(_input.font.lineHeight * lines + _input.textContainerInset.top + _input.textContainerInset.bottom);
+}
+
+- (void)textViewDidChange:(UITextView*)textView {
+    _placeholder.hidden = textView.text.length > 0;
+    NSString* trimmed = [textView.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    _send.enabled = trimmed.length > 0;
+
+    // Grow with the text up to MaxInputLines, then let the text view scroll
+    const CGFloat maxHeight = [self inputHeightForLines:MaxInputLines];
+    const CGFloat fitting = [textView sizeThatFits:CGSizeMake(textView.bounds.size.width, CGFLOAT_MAX)].height;
+    const CGFloat height = MAX([self inputHeightForLines:1], MIN(fitting, maxHeight));
+    textView.scrollEnabled = fitting > maxHeight;
+    if (_inputHeight.constant != height) {
+        _inputHeight.constant = height;
+        [self.view layoutIfNeeded];
+    }
+}
+
+- (void)sendTapped {
+    NSString* text = [_input.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (text.length == 0) {
+        return;
+    }
+    _input.text = @"";
+    [self textViewDidChange:_input];
+    [self scrollToBottomAnimated:YES];
+    __weak TimelineViewController* weakSelf = self;
+    [_session sendText:text toRoom:_roomId completion:^(NSString* error) {
+        TimelineViewController* strongSelf = weakSelf;
+        if (!strongSelf || !error) {
+            return;
+        }
+        // Keep what the user wrote so nothing is lost, unless they already started a new message
+        if (strongSelf->_input.text.length == 0) {
+            strongSelf->_input.text = text;
+            [strongSelf textViewDidChange:strongSelf->_input];
+        }
+        UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Not sent" message:error
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [strongSelf presentViewController:alert animated:YES completion:nil];
+    }];
+}
+
+- (void)toBottomTapped {
+    [self scrollToBottomAnimated:YES];
+}
+
+- (void)updateToBottomButton {
+    const BOOL show = !_messages.empty() && ![self isNearBottom];
+    if (_toBottom.hidden == !show) {
+        return;
+    }
+    if (show) {
+        _toBottom.alpha = 0;
+        _toBottom.hidden = NO;
+    }
+    [UIView animateWithDuration:0.2 animations:^{
+        self->_toBottom.alpha = show ? 1 : 0;
+    } completion:^(BOOL) {
+        self->_toBottom.hidden = !show;
+    }];
 }
 
 - (BOOL)isNearBottom {
@@ -127,6 +261,7 @@ NSString* ToNs(const std::string& s) {
         [self scrollToBottomAnimated:YES];
     }
     [self loadOlderIfNeeded];
+    [self updateToBottomButton];
 }
 
 - (void)loadOlderIfNeeded {
@@ -150,25 +285,11 @@ NSString* ToNs(const std::string& s) {
 }
 
 - (void)scrollViewDidScroll:(UIScrollView*)scrollView {
-    [self loadOlderIfNeeded];
-}
-
-- (BOOL)textFieldShouldReturn:(UITextField*)textField {
-    NSString* text = [textField.text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-    if (text.length == 0) {
-        return NO;
+    if (scrollView != _table) {
+        return;  // the composer's text view scrolls too once it is full
     }
-    textField.text = @"";
-    [_session sendText:text toRoom:_roomId completion:^(NSString* error) {
-        if (error) {
-            textField.text = text;  // keep what the user wrote so nothing is lost
-            UIAlertController* alert = [UIAlertController alertControllerWithTitle:@"Not sent" message:error
-                                                                    preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-            [self presentViewController:alert animated:YES completion:nil];
-        }
-    }];
-    return NO;
+    [self loadOlderIfNeeded];
+    [self updateToBottomButton];
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
