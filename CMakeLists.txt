@@ -52,7 +52,7 @@ else()
     find_package(OpenSSL 3 REQUIRED)
     add_library(hoshi_openssl ALIAS OpenSSL::Crypto)
 endif()
-add_library(hoshi_crypto core/crypto.cpp core/megolm.cpp core/olm.cpp core/e2ee.cpp)
+add_library(hoshi_crypto core/crypto.cpp core/megolm.cpp core/olm.cpp core/e2ee.cpp core/sas.cpp)
 target_include_directories(hoshi_crypto PUBLIC core)
 target_link_libraries(hoshi_crypto PUBLIC hoshi_openssl hoshi_core)
 target_compile_options(hoshi_crypto PRIVATE -Wall -Wextra -Werror)
@@ -115,10 +115,20 @@ add_executable(olm_tool core/olm_tool.cpp)
 target_link_libraries(olm_tool PRIVATE hoshi_crypto)
 target_compile_options(olm_tool PRIVATE -Wall -Wextra -Werror)
 
+# Driven by interop/sas_interop.py
+add_executable(sas_tool core/sas_tool.cpp)
+target_link_libraries(sas_tool PRIVATE hoshi_crypto)
+target_compile_options(sas_tool PRIVATE -Wall -Wextra -Werror)
+
 # Compatibility with vodozemac, when its Python bindings are installed in interop/venv
 set(HOSHI_INTEROP_PYTHON ${CMAKE_SOURCE_DIR}/interop/venv/bin/python)
 if(EXISTS ${HOSHI_INTEROP_PYTHON})
     add_test(NAME olm_interop COMMAND ${HOSHI_INTEROP_PYTHON} ${CMAKE_SOURCE_DIR}/interop/olm_interop.py $<TARGET_FILE:olm_tool>)
+    # With Element downloaded by third_party/serve-element.sh, its emoji table is checked too
+    file(GLOB HOSHI_ELEMENT_BUNDLE ${CMAKE_SOURCE_DIR}/third_party/element/element-v*/bundles/*/init.js)
+    add_test(NAME sas_interop COMMAND ${HOSHI_INTEROP_PYTHON} ${CMAKE_SOURCE_DIR}/interop/sas_interop.py $<TARGET_FILE:sas_tool>
+        ${HOSHI_ELEMENT_BUNDLE})
+    set_tests_properties(sas_interop PROPERTIES LABELS interop)
     add_test(NAME megolm_interop COMMAND sh -c "$<TARGET_FILE:megolm_tool> megolm_hoshi.json && ${HOSHI_INTEROP_PYTHON} ${CMAKE_SOURCE_DIR}/interop/megolm_vectors.py check megolm_hoshi.json")
     set_tests_properties(olm_interop megolm_interop PROPERTIES LABELS interop)
 endif()
