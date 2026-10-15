@@ -68,6 +68,7 @@ if(HOSHI_IOS)
         app/DevicesViewController.mm
         app/LoginViewController.mm
         app/RoomsViewController.mm
+        app/TimelineText.mm
         app/TimelineViewController.mm
         app/Session.mm
         app/UrlSessionHttp.mm

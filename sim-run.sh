@@ -1,6 +1,6 @@
 #!/bin/sh
-# Boots an iPhone simulator, installs build-sim/Hoshi.app, launches it and saves a screenshot to
-# screenshots/. The simulator service is not reachable from the Claude sandbox, so this runs outside it.
+# Boots an iPhone simulator, installs build-sim/Hoshi.app, launches it with this script's arguments and
+# saves a screenshot to screenshots/. The simulator service is not reachable from the Claude sandbox, so this runs outside it.
 set -e
 cd "$(dirname "$0")"
 app=build-sim/Hoshi.app
@@ -16,8 +16,9 @@ xcrun simctl boot "$device" 2>/dev/null || true
 xcrun simctl bootstatus "$device" -b > /dev/null
 
 xcrun simctl install "$device" "$app"
-xcrun simctl launch "$device" com.github.hoshidayori.hoshi
-sleep 3
+# Arguments go to the app, e.g. -HSOpenRoomAt 0 -HSSelectLast 40
+xcrun simctl launch --terminate-running-process "$device" com.github.hoshidayori.hoshi "$@"
+sleep 4
 mkdir -p screenshots
 xcrun simctl io "$device" screenshot screenshots/timeline.png
 echo "device $device"

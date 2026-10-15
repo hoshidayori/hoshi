@@ -108,6 +108,20 @@ NSString* ToNs(const std::string& s) {
         return lastActivity(a) > lastActivity(b);
     });
     [self.tableView reloadData];
+    [self openRoomFromLaunchArguments];
+}
+
+// For screenshots from sim-run.sh, which cannot tap: "-HSOpenRoomAt N" opens the N-th room of the list once
+- (void)openRoomFromLaunchArguments {
+    static BOOL opened = NO;
+    NSString* argument = [NSUserDefaults.standardUserDefaults stringForKey:@"HSOpenRoomAt"];
+    if (opened || !argument || _roomIds.empty()) {
+        return;
+    }
+    opened = YES;
+    const size_t index = std::min<size_t>(static_cast<size_t>(MAX(argument.integerValue, 0)), _roomIds.size() - 1);
+    [self.navigationController pushViewController:[[TimelineViewController alloc] initWithSession:_session roomId:_roomIds[index]]
+                                         animated:NO];
 }
 
 - (NSInteger)tableView:(UITableView*)tableView numberOfRowsInSection:(NSInteger)section {
