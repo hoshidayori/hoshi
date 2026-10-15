@@ -1,6 +1,8 @@
 # Private working notes, not for the public repository
 NOTES.md
 build/
+build-sim/
+screenshots/
 *.log
 # Local check that the Swift SDK package downloads; not part of the client
 probe/

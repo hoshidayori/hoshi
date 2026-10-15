@@ -1,8 +1,13 @@
 #include "json.h"
 
 #include <charconv>
+#include <clocale>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#if defined(__APPLE__)
+#include <xlocale.h>
+#endif
 
 namespace NHoshi {
 
@@ -233,9 +238,13 @@ private:
                 return TJson(value);
             }
         }
-        double value = 0;
-        const auto [end, ec] = std::from_chars(number.data(), number.data() + number.size(), value);
-        if (ec != std::errc() || end != number.data() + number.size()) {
+        // Floating-point from_chars needs iOS 26 in Apple's libc++; strtod_l with the C locale keeps '.' as
+        // the decimal point whatever the user's region is
+        static const locale_t CLocale = newlocale(LC_ALL_MASK, "C", nullptr);
+        const std::string copy(number);
+        char* end = nullptr;
+        const double value = strtod_l(copy.c_str(), &end, CLocale);
+        if (end != copy.c_str() + copy.size()) {
             Fail("bad number", start);
         }
         return TJson(value);

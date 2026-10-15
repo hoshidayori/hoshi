@@ -5,7 +5,16 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(HOSHI_SANITIZE "Build with AddressSanitizer and UBSan" ON)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(HOSHI_IOS ON)
+endif()
+
+# Sanitizers are for the desktop tests; an iOS app build does not use them
+if(HOSHI_IOS)
+    option(HOSHI_SANITIZE "Build with AddressSanitizer and UBSan" OFF)
+else()
+    option(HOSHI_SANITIZE "Build with AddressSanitizer and UBSan" ON)
+endif()
 
 add_library(hoshi_core
     core/json.cpp
@@ -21,6 +30,28 @@ if(HOSHI_SANITIZE)
     add_link_options(-fsanitize=address,undefined)
     target_compile_options(hoshi_core PUBLIC -fsanitize=address,undefined)
     target_link_options(hoshi_core PUBLIC -fsanitize=address,undefined)
+endif()
+
+if(HOSHI_IOS)
+    # Simulator build without Xcode (works in a sandbox that keeps ~/Library read-only):
+    # cmake -S . -B build-sim -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_ARCHITECTURES=arm64
+    enable_language(OBJCXX)
+    add_executable(Hoshi MACOSX_BUNDLE
+        app/main.mm
+        app/TimelineViewController.mm
+    )
+    target_link_libraries(Hoshi PRIVATE hoshi_core "-framework UIKit" "-framework Foundation")
+    target_compile_options(Hoshi PRIVATE -fobjc-arc -Wall -Wextra -Werror)
+    set_target_properties(Hoshi PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/app/Info.plist
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.github.hoshidayori.hoshi"
+        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.github.hoshidayori.hoshi"
+        XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "17.0"
+        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+        XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
+        XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO
+    )
+    return()
 endif()
 
 enable_testing()
