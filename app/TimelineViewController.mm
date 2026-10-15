@@ -50,6 +50,9 @@ std::string KeyOf(const NHoshi::TMessage& message) {
     HSTimelineTextView* _text;
     std::vector<std::string> _keys;
     NSArray<NSAttributedString*>* _items;
+    std::vector<NSUInteger> _itemOffsets;  // where each item starts in the text
+    // The avatar of a series whose start, with its own avatar, scrolled off the top
+    UILabel* _sticky;
     // Composer: Return inserts a line break, the button sends; it grows up to MaxInputLines, then scrolls
     UIView* _composer;
     UITextView* _input;
@@ -86,6 +89,16 @@ static const CGFloat MaxInputLines = 6;
     tap.cancelsTouchesInView = NO;
     tap.delegate = self;
     [_text addGestureRecognizer:tap];
+
+    _sticky = [[UILabel alloc] initWithFrame:CGRectMake(HSBubbleSide, 0, HSAvatarSize, HSAvatarSize)];
+    _sticky.layer.cornerRadius = HSAvatarSize / 2;
+    _sticky.clipsToBounds = YES;
+    _sticky.textAlignment = NSTextAlignmentCenter;
+    _sticky.textColor = UIColor.whiteColor;
+    _sticky.font = [UIFont systemFontOfSize:HSAvatarSize * 0.45 weight:UIFontWeightSemibold];
+    _sticky.hidden = YES;
+    _sticky.isAccessibilityElement = NO;  // the name in the text already says who it is
+    [_text addSubview:_sticky];
 
     _composer = [[UIView alloc] init];
     _composer.translatesAutoresizingMaskIntoConstraints = NO;
@@ -226,7 +239,7 @@ static const CGFloat MaxInputLines = 6;
 
 - (NSAttributedString*)itemForMessage:(const NHoshi::TMessage&)message showSender:(BOOL)showSender room:(const NHoshi::TRoom&)room {
     NSMutableAttributedString* item = [[NSMutableAttributedString alloc] init];
-    const CGFloat indent = HSBubbleSide + HSBubblePadX;
+    const CGFloat indent = HSBubbleSide + HSAvatarColumn + HSBubblePadX;
 
     // The name only above the first of several messages in a row from the same person, on screen and in a copy
     if (showSender) {
@@ -239,10 +252,17 @@ static const CGFloat MaxInputLines = 6;
         NSString* sender = ToNs(name == room.MemberNames.end() ? message.Sender : name->second);
         UIFont* font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
         font = [UIFont fontWithDescriptor:[font.fontDescriptor fontDescriptorWithSymbolicTraits:UIFontDescriptorTraitBold] size:0];
+        // The avatar next to the name: for now the first letter of the name, without the "@" of a bare user id
+        HSSenderMeta* avatar = [[HSSenderMeta alloc] init];
+        NSString* letters = [sender hasPrefix:@"@"] && sender.length > 1 ? [sender substringFromIndex:1] : sender;
+        avatar.initial = letters.length > 0
+            ? [letters substringWithRange:[letters rangeOfComposedCharacterSequenceAtIndex:0]].localizedUppercaseString : @"?";
+        avatar.color = SenderColor(message.Sender);
         [item appendAttributedString:[[NSAttributedString alloc] initWithString:[sender stringByAppendingString:@"\n"] attributes:@{
             NSFontAttributeName: font,
             NSForegroundColorAttributeName: SenderColor(message.Sender),
             NSParagraphStyleAttributeName: style,
+            HSSenderMetaAttribute: avatar,
         }]];
     }
 
@@ -453,6 +473,12 @@ static const CGFloat MaxInputLines = 6;
     const NSRange selection = _text.selectedRange;
 
     const auto moved = [self applyItems:items keys:keys];
+    _itemOffsets.clear();
+    NSUInteger itemOffset = 0;
+    for (NSAttributedString* item in _items) {
+        _itemOffsets.push_back(itemOffset);
+        itemOffset += item.length;
+    }
 
     // A selection the user is making stays on the same text
     const NSUInteger length = _text.textStorage.length;
@@ -483,6 +509,7 @@ static const CGFloat MaxInputLines = 6;
     }
     [self loadOlderIfNeeded];
     [self updateToBottomButton];
+    [self updateStickyAvatar];
     if ([NSUserDefaults.standardUserDefaults boolForKey:@"HSStressHistory"]) {
         [self stressHistoryAfterUpdateFrom:started anchor:first ? NSNotFound : moved(anchor)];
     }
@@ -620,6 +647,55 @@ static const CGFloat MaxInputLines = 6;
     }
     [self loadOlderIfNeeded];
     [self updateToBottomButton];
+    [self updateStickyAvatar];
+}
+
+- (nullable HSSenderMeta*)senderOfItem:(size_t)index {
+    NSAttributedString* item = _items[index];
+    return item.length > 0 ? [item attribute:HSSenderMetaAttribute atIndex:0 effectiveRange:nullptr] : nil;
+}
+
+// Top of the item's first paragraph, in the text view's content coordinates
+- (CGFloat)topOfItem:(size_t)index {
+    id<NSTextLocation> location = [self locationOfOffset:_itemOffsets[index]];
+    NSTextLayoutFragment* fragment = location ? [_text.textLayoutManager textLayoutFragmentForLocation:location] : nil;
+    return fragment ? fragment.layoutFragmentFrame.origin.y + _text.textContainerInset.top : 0;
+}
+
+// When the start of a series is above the screen, its avatar waits at the top edge while the series' messages
+// are still visible, and the next series pushes it up and away
+- (void)updateStickyAvatar {
+    const CGFloat top = _text.contentOffset.y + _text.adjustedContentInset.top;
+    NSTextLayoutFragment* fragment = _items.count == 0 ? nil
+        : [_text.textLayoutManager textLayoutFragmentForPosition:CGPointMake(HSBubbleSide * 2, MAX(top - _text.textContainerInset.top, 0))];
+    if (!fragment) {
+        _sticky.hidden = YES;
+        return;
+    }
+    const NSUInteger offset = [self offsetOfLocation:fragment.rangeInElement.location];
+    const auto after = std::upper_bound(_itemOffsets.begin(), _itemOffsets.end(), offset);
+    size_t start = after == _itemOffsets.begin() ? 0 : static_cast<size_t>(after - _itemOffsets.begin()) - 1;
+    while (start > 0 && ![self senderOfItem:start]) {
+        --start;
+    }
+    HSSenderMeta* sender = [self senderOfItem:start];
+    size_t next = start + 1;
+    while (next < _items.count && ![self senderOfItem:next]) {
+        ++next;
+    }
+    // The name line with its own avatar is still on screen: no second one
+    const CGFloat nameBottom = [self topOfItem:start] + 10 + HSBubblePadY + HSAvatarSize;
+    if (!sender || nameBottom > top) {
+        _sticky.hidden = YES;
+        return;
+    }
+    const CGFloat seriesBottom = next < _items.count ? [self topOfItem:next] + 10 : _text.contentSize.height;
+    const CGFloat y = MIN(top + 6, seriesBottom - HSAvatarSize);
+    _sticky.text = sender.initial;
+    _sticky.backgroundColor = sender.color;
+    _sticky.frame = CGRectMake(HSBubbleSide, y, HSAvatarSize, HSAvatarSize);
+    _sticky.hidden = NO;
+    [_text bringSubviewToFront:_sticky];
 }
 
 #pragma mark - Retry

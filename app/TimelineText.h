@@ -25,8 +25,18 @@ typedef NS_ENUM(NSInteger, HSMessageStatus) {
 
 extern NSAttributedStringKey const HSMessageMetaAttribute;
 
+// What the fragment draws left of a sender's name: the avatar; set as the HSSenderMetaAttribute of the name
+@interface HSSenderMeta : NSObject
+@property (nonatomic, copy) NSString* initial;  // shown until there is a picture
+@property (nonatomic, strong) UIColor* color;
+@end
+
+extern NSAttributedStringKey const HSSenderMetaAttribute;
+
 // Geometry shared by the paragraph styles and the drawing
-extern const CGFloat HSBubbleSide;     // from the screen edge to the bubble
+extern const CGFloat HSBubbleSide;     // from the screen edge to the avatar
+extern const CGFloat HSAvatarSize;
+extern const CGFloat HSAvatarColumn;   // from the avatar's left edge to the bubble
 extern const CGFloat HSBubblePadX;     // from the bubble edge to the text
 extern const CGFloat HSBubblePadY;
 extern const CGFloat HSTimeColumn;     // room right of the widest bubble for the time and the status icon

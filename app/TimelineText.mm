@@ -1,8 +1,11 @@
 #import "TimelineText.h"
 
 NSAttributedStringKey const HSMessageMetaAttribute = @"HSMessageMeta";
+NSAttributedStringKey const HSSenderMetaAttribute = @"HSSenderMeta";
 
 const CGFloat HSBubbleSide = 12;
+const CGFloat HSAvatarSize = 30;
+const CGFloat HSAvatarColumn = HSAvatarSize + 8;
 const CGFloat HSBubblePadX = 10;
 const CGFloat HSBubblePadY = 7;
 const CGFloat HSTimeColumn = 58;
@@ -21,6 +24,22 @@ const CGFloat HSTimeColumn = 58;
 
 - (NSUInteger)hash {
     return _time.hash ^ static_cast<NSUInteger>(_status) ^ _txnId.hash;
+}
+
+@end
+
+@implementation HSSenderMeta
+
+- (BOOL)isEqual:(id)other {
+    if (![other isKindOfClass:[HSSenderMeta class]]) {
+        return NO;
+    }
+    HSSenderMeta* meta = other;
+    return [meta.initial isEqualToString:_initial] && [meta.color isEqual:_color];
+}
+
+- (NSUInteger)hash {
+    return _initial.hash;
 }
 
 @end
@@ -62,8 +81,26 @@ UIFont* TimeFont() {
     return CGRectInset(text, -HSBubblePadX, -HSBubblePadY);
 }
 
+- (nullable HSSenderMeta*)senderMeta {
+    NSTextParagraph* paragraph = [self.textElement isKindOfClass:[NSTextParagraph class]] ? (NSTextParagraph*)self.textElement : nil;
+    if (paragraph.attributedString.length == 0) {
+        return nil;
+    }
+    return [paragraph.attributedString attribute:HSSenderMetaAttribute atIndex:0 effectiveRange:nullptr];
+}
+
+// Left of the name, centered on its line
+- (CGRect)avatarRect {
+    NSTextLineFragment* line = self.textLineFragments.firstObject;
+    const CGFloat middle = line ? CGRectGetMidY(line.typographicBounds) : HSAvatarSize / 2;
+    return CGRectMake(HSBubbleSide - self.layoutFragmentFrame.origin.x, middle - HSAvatarSize / 2, HSAvatarSize, HSAvatarSize);
+}
+
 - (CGRect)renderingSurfaceBounds {
     CGRect bounds = [super renderingSurfaceBounds];
+    if ([self senderMeta]) {
+        return CGRectUnion(bounds, [self avatarRect]);
+    }
     if (![self meta]) {
         return bounds;
     }
@@ -75,7 +112,24 @@ UIFont* TimeFont() {
     return CGRectUnion(bounds, bubble);
 }
 
+- (void)drawAvatar:(HSSenderMeta*)sender atPoint:(CGPoint)point inContext:(CGContextRef)context {
+    const CGRect circle = CGRectOffset([self avatarRect], point.x, point.y);
+    UIGraphicsPushContext(context);
+    UITraitCollection* traits = UITraitCollection.currentTraitCollection;
+    [[sender.color resolvedColorWithTraitCollection:traits] setFill];
+    [[UIBezierPath bezierPathWithOvalInRect:circle] fill];
+    UIFont* font = [UIFont systemFontOfSize:HSAvatarSize * 0.45 weight:UIFontWeightSemibold];
+    NSDictionary* attributes = @{NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.whiteColor};
+    const CGSize size = [sender.initial sizeWithAttributes:attributes];
+    [sender.initial drawAtPoint:CGPointMake(CGRectGetMidX(circle) - size.width / 2, CGRectGetMidY(circle) - size.height / 2)
+                 withAttributes:attributes];
+    UIGraphicsPopContext();
+}
+
 - (void)drawAtPoint:(CGPoint)point inContext:(CGContextRef)context {
+    if (HSSenderMeta* sender = [self senderMeta]) {
+        [self drawAvatar:sender atPoint:point inContext:context];
+    }
     HSMessageMeta* meta = [self meta];
     CGRect bubble = meta ? [self bubbleRect] : CGRectNull;
     if (!CGRectIsNull(bubble)) {
