@@ -51,6 +51,7 @@ std::string KeyOf(const NHoshi::TMessage& message) {
     std::vector<std::string> _keys;
     NSArray<NSAttributedString*>* _items;
     std::vector<NSUInteger> _itemOffsets;  // where each item starts in the text
+    NSDictionary<NSString*, NSAttributedString*>* _itemCache;  // the last update's items by what they depend on
     // The avatar of a series whose start, with its own avatar, scrolled off the top: a letter, or a picture over it
     UILabel* _sticky;
     UIImageView* _stickyImage;
@@ -64,6 +65,7 @@ std::string KeyOf(const NHoshi::TMessage& message) {
     BOOL _hasOlder;
     BOOL _loadingOlder;
     BOOL _sentSinceUpdate;
+    NSString* _stressSplit;  // -HSStressHistory: where the last update's time went
 }
 
 static const CGFloat MaxInputLines = 6;
@@ -406,9 +408,19 @@ static const CGFloat MaxInputLines = 6;
     return [[self content] locationFromLocation:[self content].documentRange.location withOffset:static_cast<NSInteger>(offset)];
 }
 
-// Exact positions need the whole text laid out; TextKit 2 otherwise estimates the parts not yet seen
+// Exact positions need the text above them laid out; TextKit 2 otherwise estimates the parts not yet seen.
+// Laying out all of a long room took most of an update, so callers ask only for the part they measure.
 - (void)layOutAll {
-    [_text.textLayoutManager ensureLayoutForRange:_text.textLayoutManager.documentRange];
+    [self layOutFrom:0 to:_text.textStorage.length];
+}
+
+- (void)layOutFrom:(NSUInteger)from to:(NSUInteger)to {
+    const NSUInteger length = _text.textStorage.length;
+    id<NSTextLocation> start = [self locationOfOffset:std::min(from, length)];
+    id<NSTextLocation> end = [self locationOfOffset:std::min(std::max(from, to), length)];
+    if (start && end) {
+        [_text.textLayoutManager ensureLayoutForRange:[[NSTextRange alloc] initWithLocation:start endLocation:end]];
+    }
     [_text layoutIfNeeded];
     // A few messages sit at the bottom, next to the composer, as in other messengers
     const CGFloat visible = _text.bounds.size.height - _text.safeAreaInsets.top - _text.safeAreaInsets.bottom;
@@ -424,7 +436,9 @@ static const CGFloat MaxInputLines = 6;
 }
 
 - (void)scrollToBottomAnimated:(BOOL)animated {
-    [self layOutAll];
+    // The last messages, enough for a screen of them; what is above keeps its earlier layout or estimate
+    const size_t tail = _itemOffsets.size() > 40 ? _itemOffsets.size() - 40 : 0;
+    [self layOutFrom:_itemOffsets.empty() ? 0 : _itemOffsets[tail] to:_text.textStorage.length];
     const CGFloat bottom = _text.contentSize.height - _text.bounds.size.height + _text.adjustedContentInset.bottom;
     [_text setContentOffset:CGPointMake(0, MAX(-_text.adjustedContentInset.top, bottom)) animated:animated];
 }
@@ -463,14 +477,36 @@ static const CGFloat MaxInputLines = 6;
     messages.insert(messages.end(), room.Pending.begin(), room.Pending.end());
     std::vector<std::string> keys;
     NSMutableArray<NSAttributedString*>* items = [NSMutableArray arrayWithCapacity:messages.size()];
+    // An unchanged message reuses its text from the last update: building all of them each time took a
+    // noticeable part of an update in a long room
+    NSMutableDictionary<NSString*, NSAttributedString*>* cache = [NSMutableDictionary dictionaryWithCapacity:messages.size()];
     for (size_t i = 0; i < messages.size(); ++i) {
-        const bool showSender = i == 0 || messages[i - 1].Sender != messages[i].Sender;
+        const NHoshi::TMessage& message = messages[i];
+        const bool showSender = i == 0 || messages[i - 1].Sender != message.Sender;
         // The time only where it changes, or a new series starts; a column of the same minute says nothing
-        const bool showTime = showSender || ![TimeOf(messages[i - 1].OriginServerTs) isEqualToString:TimeOf(messages[i].OriginServerTs)];
-        keys.push_back(KeyOf(messages[i]));
-        [items addObject:[self itemForMessage:messages[i] showSender:showSender showTime:showTime room:room]];
+        const bool showTime = showSender || messages[i - 1].OriginServerTs / 60000 != message.OriginServerTs / 60000;
+        keys.push_back(KeyOf(message));
+        // Everything the text of the message depends on
+        std::string signature = keys.back() + "|" + std::to_string(showSender) + std::to_string(showTime) +
+            std::to_string(static_cast<int>(message.SendState)) + std::to_string(message.IsWaitingForKey()) + "|" +
+            std::to_string(message.OriginServerTs / 60000) + "|" + message.Body;
+        if (showSender) {
+            const auto name = room.MemberNames.find(message.Sender);
+            const auto avatar = room.MemberAvatars.find(message.Sender);
+            signature += "|" + (name == room.MemberNames.end() ? std::string() : name->second);
+            if (avatar != room.MemberAvatars.end()) {
+                signature += "|" + avatar->second + ([_session avatarForMxc:avatar->second] ? "+" : "-");
+            }
+        }
+        NSString* cacheKey = [[NSString alloc] initWithBytes:signature.data() length:signature.size() encoding:NSUTF8StringEncoding]
+            ?: @(keys.back().c_str());
+        NSAttributedString* item = _itemCache[cacheKey] ?: [self itemForMessage:message showSender:showSender showTime:showTime room:room];
+        cache[cacheKey] = item;
+        [items addObject:item];
     }
+    _itemCache = cache;
 
+    const CFAbsoluteTime built = CFAbsoluteTimeGetCurrent();
     const bool first = _keys.empty();
     const bool atBottom = [self isNearBottom];
     // What the user is reading: the message at the top of the screen and how far below the top edge it is
@@ -487,6 +523,7 @@ static const CGFloat MaxInputLines = 6;
     const NSRange selection = _text.selectedRange;
 
     const auto moved = [self applyItems:items keys:keys];
+    const CFAbsoluteTime applied = CFAbsoluteTimeGetCurrent();
     _itemOffsets.clear();
     NSUInteger itemOffset = 0;
     for (NSAttributedString* item in _items) {
@@ -514,8 +551,9 @@ static const CGFloat MaxInputLines = 6;
         // New messages scroll into view only for someone already at the bottom, not for someone reading history
         [self scrollToBottomAnimated:YES];
     } else if (id<NSTextLocation> location = [self locationOfOffset:std::min(moved(anchor), length)]) {
-        // Older messages went in front, or a message changed above: keep the one being read where it was
-        [self layOutAll];
+        // Older messages went in front, or a message changed above: keep the one being read where it was.
+        // Its position needs everything above it, and a screen below for what comes into view.
+        [self layOutFrom:0 to:moved(anchor) + 4000];
         NSTextLayoutFragment* fragment = [_text.textLayoutManager textLayoutFragmentForLocation:location];
         if (fragment) {
             _text.contentOffset = CGPointMake(0, fragment.layoutFragmentFrame.origin.y + _text.textContainerInset.top - anchorShift);
@@ -525,6 +563,8 @@ static const CGFloat MaxInputLines = 6;
     [self updateToBottomButton];
     [self updateStickyAvatar];
     if ([NSUserDefaults.standardUserDefaults boolForKey:@"HSStressHistory"]) {
+        _stressSplit = [NSString stringWithFormat:@"build %.1f, edit %.1f, layout and scroll %.1f",
+            (built - started) * 1000, (applied - built) * 1000, (CFAbsoluteTimeGetCurrent() - applied) * 1000];
         [self stressHistoryAfterUpdateFrom:started anchor:first ? NSNotFound : moved(anchor)];
     }
 }
@@ -543,7 +583,8 @@ static const CGFloat MaxInputLines = 6;
         stayed = now == anchor ? @"yes" : [NSString stringWithFormat:@"NO (%lu -> %lu)", static_cast<unsigned long>(anchor),
                                                                       static_cast<unsigned long>(now)];
     }
-    [report appendFormat:@"messages %zu, update %.1f ms, top line stayed %@, more %d\n", _keys.size(), ms, stayed, _hasOlder];
+    [report appendFormat:@"messages %zu, update %.1f ms (%@), top line stayed %@, more %d\n", _keys.size(), ms, _stressSplit, stayed,
+        _hasOlder];
     NSURL* documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     [report writeToURL:[documents URLByAppendingPathComponent:@"history.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
     if (_hasOlder) {

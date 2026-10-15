@@ -164,6 +164,16 @@ NSString* ToNs(const std::string& s) {
         content.imageProperties.maximumSize = CGSizeMake(40, 40);
         content.imageProperties.reservedLayoutSize = CGSizeMake(40, 40);
         content.imageProperties.cornerRadius = 20;
+        if (room.Encrypted) {
+            // The picture took the lock's place, so the lock follows the name
+            NSMutableAttributedString* title = [[NSMutableAttributedString alloc] initWithString:[content.text stringByAppendingString:@" "]
+                attributes:@{NSFontAttributeName: content.textProperties.font}];
+            NSTextAttachment* lock = [NSTextAttachment textAttachmentWithImage:[[UIImage systemImageNamed:@"lock.fill"
+                withConfiguration:[UIImageSymbolConfiguration configurationWithFont:content.secondaryTextProperties.font]]
+                imageWithTintColor:UIColor.secondaryLabelColor renderingMode:UIImageRenderingModeAlwaysOriginal]];
+            [title appendAttributedString:[NSAttributedString attributedStringWithAttachment:lock]];
+            content.attributedText = title;
+        }
     } else if (room.Encrypted) {
         content.image = [UIImage systemImageNamed:@"lock.fill"];
         content.imageProperties.tintColor = UIColor.secondaryLabelColor;
