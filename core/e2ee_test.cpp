@@ -113,12 +113,20 @@ int main() {
     Encrypt(alice.Machine, "5");
     Expect(alice.Machine.PrepareRoomKey(Room, {bob.Device()}, small, Start + 5000), "three messages make it due");
 
+    // Verified devices: only with the key that was verified
+    alice.Machine.MarkVerified(bob.Device());
+    TDevice replaced = bob.Device();
+    replaced.Ed25519 = carol.Device().Ed25519;
+    Expect(alice.Machine.IsVerified(bob.Device()) && !alice.Machine.IsVerified(replaced) && !alice.Machine.IsVerified(carol.Device()),
+        "a device is verified with its key only");
+
     // After the period, also across a save and load
     const std::int64_t created = Start + 5000;
     const auto loaded = TMachine::Load(alice.Machine.Save());
     Expect(loaded.has_value(), "machine loads");
     if (loaded) {
         TMachine machine = *loaded;
+        Expect(machine.IsVerified(bob.Device()) && !machine.IsVerified(carol.Device()), "verified devices survive a reload");
         Expect(!machine.PrepareRoomKey(Room, {}, rotation, created + rotation.PeriodMs - 1), "a week is not over");
         Expect(machine.PrepareRoomKey(Room, {}, rotation, created + rotation.PeriodMs), "a week is over");
     }

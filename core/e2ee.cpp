@@ -222,6 +222,15 @@ TJson TMachine::ClaimRequestFor(const std::string& roomId, const std::vector<TDe
     return TJson(std::move(users));
 }
 
+void TMachine::MarkVerified(const TDevice& device) {
+    Verified[device.UserId + "|" + device.DeviceId] = device.Ed25519;
+}
+
+bool TMachine::IsVerified(const TDevice& device) const {
+    const auto it = Verified.find(device.UserId + "|" + device.DeviceId);
+    return it != Verified.end() && it->second == device.Ed25519;
+}
+
 TJson TMachine::Save() const {
     TJson::TObject olm;
     for (const auto& [key, sessions] : OlmSessions) {
@@ -254,6 +263,7 @@ TJson TMachine::Save() const {
         {"olm", TJson(std::move(olm))},
         {"outbound", TJson(std::move(outbound))},
         {"inbound", TJson(std::move(inbound))},
+        {"verified", TJson(TJson::TObject(Verified.begin(), Verified.end()))},
     });
 }
 
@@ -296,6 +306,13 @@ std::optional<TMachine> TMachine::Load(const TJson& saved) {
         for (const auto& json : saved["inbound"].AsArray()) {
             if (auto session = NMegolm::TInboundSession::Load(json["session"])) {
                 machine.Inbound.insert_or_assign(std::make_pair(json.StringOr("room_id"), session->SessionId()), std::move(*session));
+            }
+        }
+    }
+    if (saved["verified"].IsObject()) {
+        for (const auto& [device, key] : saved["verified"].AsObject()) {
+            if (key.IsString()) {
+                machine.Verified[device] = key.AsString();
             }
         }
     }

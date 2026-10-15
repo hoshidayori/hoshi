@@ -13,6 +13,9 @@ screenshots/
 probe/
 synapse/venv/
 interop/venv/
+# Downloaded for comparison: Element Web for live tests, other clients' code to read
+third_party/element/
+interop/ref/
 synapse/data/
 # Local test server secrets: shared registration secret, macaroon and form secrets, signing key
 synapse/homeserver.yaml

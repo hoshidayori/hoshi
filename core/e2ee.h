@@ -79,6 +79,11 @@ public:
     // Decrypts an m.room.encrypted timeline event: the plaintext event {"type", "content", "room_id"}, or nullopt
     std::optional<TJson> DecryptRoomEvent(const std::string& roomId, const TJson& event) const;
 
+    // Devices whose Ed25519 key a user confirmed by verification. A device counts as verified only while
+    // /keys/query returns the same key for it.
+    void MarkVerified(const TDevice& device);
+    bool IsVerified(const TDevice& device) const;
+
     // Everything, private keys included: the caller stores it protected (Keychain or a protected file)
     TJson Save() const;
     static std::optional<TMachine> Load(const TJson& saved);
@@ -95,6 +100,7 @@ private:
     std::map<std::string, NMegolm::TOutboundSession> Outbound;
     std::map<std::string, std::set<std::string>> SharedWith;
     std::map<std::string, std::int64_t> OutboundCreatedMs;
+    std::map<std::string, std::string> Verified;  // "user|device" -> Ed25519 key
     // Megolm sessions for receiving, by (room, session id)
     std::map<std::pair<std::string, std::string>, NMegolm::TInboundSession> Inbound;
 };
