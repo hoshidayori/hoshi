@@ -59,6 +59,8 @@ NSString* ToNs(const std::string& s) {
                                                name:HSSessionStateDidChange object:_session];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(verificationChanged)
                                                name:HSSessionVerificationDidChange object:_session];
+    [NSNotificationCenter.defaultCenter addObserver:self.tableView selector:@selector(reloadData)
+                                               name:HSSessionAvatarsDidChange object:_session];
     [self stateChanged];
 }
 
@@ -147,7 +149,22 @@ NSString* ToNs(const std::string& s) {
         const auto& last = room.Timeline.back();
         content.secondaryText = last.IsWaitingForKey() ? @"🔒 Encrypted message" : ToNs(last.Body);
     }
-    if (room.Encrypted) {
+    // The room's own avatar; for an unnamed room, which is named after its people, the other person's
+    std::string avatar = room.AvatarUrl;
+    if (avatar.empty() && room.Name.empty()) {
+        for (const auto& [user, url] : room.MemberAvatars) {
+            if (user != _session.userId.UTF8String) {
+                avatar = url;
+                break;
+            }
+        }
+    }
+    if (UIImage* image = avatar.empty() ? nil : [_session avatarForMxc:avatar]) {
+        content.image = image;
+        content.imageProperties.maximumSize = CGSizeMake(40, 40);
+        content.imageProperties.reservedLayoutSize = CGSizeMake(40, 40);
+        content.imageProperties.cornerRadius = 20;
+    } else if (room.Encrypted) {
         content.image = [UIImage systemImageNamed:@"lock.fill"];
         content.imageProperties.tintColor = UIColor.secondaryLabelColor;
     }

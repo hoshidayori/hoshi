@@ -51,8 +51,9 @@ std::string KeyOf(const NHoshi::TMessage& message) {
     std::vector<std::string> _keys;
     NSArray<NSAttributedString*>* _items;
     std::vector<NSUInteger> _itemOffsets;  // where each item starts in the text
-    // The avatar of a series whose start, with its own avatar, scrolled off the top
+    // The avatar of a series whose start, with its own avatar, scrolled off the top: a letter, or a picture over it
     UILabel* _sticky;
+    UIImageView* _stickyImage;
     // Composer: Return inserts a line break, the button sends; it grows up to MaxInputLines, then scrolls
     UIView* _composer;
     UITextView* _input;
@@ -98,6 +99,10 @@ static const CGFloat MaxInputLines = 6;
     _sticky.font = [UIFont systemFontOfSize:HSAvatarSize * 0.45 weight:UIFontWeightSemibold];
     _sticky.hidden = YES;
     _sticky.isAccessibilityElement = NO;  // the name in the text already says who it is
+    _stickyImage = [[UIImageView alloc] initWithFrame:_sticky.bounds];
+    _stickyImage.contentMode = UIViewContentModeScaleAspectFill;
+    _stickyImage.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [_sticky addSubview:_stickyImage];
     [_text addSubview:_sticky];
 
     _composer = [[UIView alloc] init];
@@ -182,6 +187,9 @@ static const CGFloat MaxInputLines = 6;
 
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(stateChanged)
                                                name:HSSessionStateDidChange object:_session];
+    // A picture that arrived replaces the letter in place, like any other change of a message
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(stateChanged)
+                                               name:HSSessionAvatarsDidChange object:_session];
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -259,6 +267,9 @@ static const CGFloat MaxInputLines = 6;
         avatar.initial = letters.length > 0
             ? [letters substringWithRange:[letters rangeOfComposedCharacterSequenceAtIndex:0]].localizedUppercaseString : @"?";
         avatar.color = SenderColor(message.Sender);
+        if (const auto url = room.MemberAvatars.find(message.Sender); url != room.MemberAvatars.end()) {
+            avatar.image = [_session avatarForMxc:url->second];
+        }
         [item appendAttributedString:[[NSAttributedString alloc] initWithString:[sender stringByAppendingString:@"\n"] attributes:@{
             NSFontAttributeName: font,
             NSForegroundColorAttributeName: SenderColor(message.Sender),
@@ -696,6 +707,7 @@ static const CGFloat MaxInputLines = 6;
     const CGFloat y = MIN(top + 6, seriesBottom - HSAvatarSize);
     _sticky.text = sender.initial;
     _sticky.backgroundColor = sender.color;
+    _stickyImage.image = sender.image;
     // A ring of the background color, so it lies cleanly over the times it passes
     _sticky.layer.borderWidth = 2;
     _sticky.layer.borderColor = [UIColor.systemBackgroundColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;

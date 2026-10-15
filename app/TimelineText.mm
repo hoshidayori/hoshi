@@ -34,7 +34,7 @@ const CGFloat HSBubblePadY = 7;
         return NO;
     }
     HSSenderMeta* meta = other;
-    return [meta.initial isEqualToString:_initial] && [meta.color isEqual:_color];
+    return [meta.initial isEqualToString:_initial] && [meta.color isEqual:_color] && meta.image == _image;
 }
 
 - (NSUInteger)hash {
@@ -116,6 +116,14 @@ UIFont* TimeFont() {
 - (void)drawAvatar:(HSSenderMeta*)sender atPoint:(CGPoint)point inContext:(CGContextRef)context {
     const CGRect circle = CGRectOffset([self avatarRect], point.x, point.y);
     UIGraphicsPushContext(context);
+    if (sender.image) {
+        CGContextSaveGState(context);
+        [[UIBezierPath bezierPathWithOvalInRect:circle] addClip];
+        [sender.image drawInRect:circle];
+        CGContextRestoreGState(context);
+        UIGraphicsPopContext();
+        return;
+    }
     UITraitCollection* traits = UITraitCollection.currentTraitCollection;
     [[sender.color resolvedColorWithTraitCollection:traits] setFill];
     [[UIBezierPath bezierPathWithOvalInRect:circle] fill];

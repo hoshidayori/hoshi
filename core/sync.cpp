@@ -25,6 +25,8 @@ void ApplyStateEvent(TRoom& room, const TJson& event) {
         }
     } else if (type == "m.room.canonical_alias" && event["state_key"].IsString() && event["state_key"].AsString().empty()) {
         room.CanonicalAlias = event["content"].StringOr("alias");
+    } else if (type == "m.room.avatar" && event["state_key"].IsString() && event["state_key"].AsString().empty()) {
+        room.AvatarUrl = event["content"].StringOr("url");
     } else if (type == "m.room.member" && event["state_key"].IsString()) {
         const std::string& user = event["state_key"].AsString();
         const std::string membership = event["content"].StringOr("membership");
@@ -35,6 +37,12 @@ void ApplyStateEvent(TRoom& room, const TJson& event) {
                 room.MemberNames.erase(user);
             } else {
                 room.MemberNames[user] = name;
+            }
+            const std::string avatar = event["content"].StringOr("avatar_url");
+            if (avatar.empty()) {
+                room.MemberAvatars.erase(user);
+            } else {
+                room.MemberAvatars[user] = avatar;
             }
         } else {
             room.Members.erase(user);

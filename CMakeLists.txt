@@ -165,6 +165,7 @@ add_test(NAME client_test COMMAND client_test)
 add_executable(e2e_test core/e2e_test.cpp)
 target_link_libraries(e2e_test PRIVATE hoshi_core)
 target_compile_options(e2e_test PRIVATE -Wall -Wextra -Werror)
+target_compile_definitions(e2e_test PRIVATE HOSHI_TESTDATA="${CMAKE_SOURCE_DIR}/core/testdata")
 add_test(NAME e2e_test COMMAND e2e_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/synapse/data)
 set_tests_properties(e2e_test PROPERTIES LABELS synapse)
 

@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -103,6 +105,26 @@ int main() {
         Expect(inOrder, "all history messages once and in order");
         Expect(!after.Timeline.empty() && after.Timeline.front().Body == text, "the first message of the room comes first");
         late.Logout();
+
+        // Avatars: alice uploads a picture and sets it; bob sees it in her member event and gets a thumbnail
+        {
+            std::ifstream file(HOSHI_TESTDATA "/avatar.png", std::ios::binary);
+            const std::string png((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+            Expect(png.size() > 100, "test avatar read");
+            const std::string mxc = alice.UploadMedia(png, "image/png");
+            Expect(ParseMxc(mxc).has_value(), "upload gives an mxc URI");
+            alice.SetAvatarUrl(mxc);
+            bool seen = false;
+            for (int i = 0; i < 5 && !seen; ++i) {
+                bob.Sync(1000);
+                const auto& avatars = bob.State().Rooms.at(roomId).MemberAvatars;
+                seen = avatars.count(alice.UserId()) && avatars.at(alice.UserId()) == mxc;
+            }
+            Expect(seen, "bob sees alice's avatar in her member event");
+            const std::string thumbnail = bob.FetchThumbnail(mxc, 96);
+            const bool image = thumbnail.rfind("\x89PNG", 0) == 0 || thumbnail.rfind("\xFF\xD8\xFF", 0) == 0;
+            Expect(image, "the thumbnail is an image");
+        }
 
         // Leave, so that test rooms do not pile up in the users' room lists
         bob.LeaveRoom(roomId);

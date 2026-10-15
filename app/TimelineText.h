@@ -29,6 +29,7 @@ extern NSAttributedStringKey const HSMessageMetaAttribute;
 @interface HSSenderMeta : NSObject
 @property (nonatomic, copy) NSString* initial;  // shown until there is a picture
 @property (nonatomic, strong) UIColor* color;
+@property (nonatomic, strong, nullable) UIImage* image;
 @end
 
 extern NSAttributedStringKey const HSSenderMetaAttribute;

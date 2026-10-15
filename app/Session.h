@@ -1,4 +1,4 @@
-#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
 
 #include "sync.h"
 #include "verification.h"
@@ -14,6 +14,8 @@ extern NSNotificationName const HSSessionStateDidChange;
 extern NSNotificationName const HSSessionDidLoseAuthorization;
 // Posted on the main queue when a device verification starts, moves on or ends
 extern NSNotificationName const HSSessionVerificationDidChange;
+// Posted on the main queue when an avatar asked for with avatarForMxc: has arrived
+extern NSNotificationName const HSSessionAvatarsDidChange;
 
 // A device from /keys/query and whether this device has verified it
 struct HSDevice {
@@ -65,6 +67,10 @@ struct HSDevice {
 - (void)confirmEmoji;
 // mismatch: the emoji differ, which may mean an attack; otherwise the user just stopped
 - (void)cancelVerificationBecauseOfMismatch:(BOOL)mismatch;
+
+// The picture of an mxc:// avatar, from memory or the cache on disk; nil while it is being downloaded, after
+// which HSSessionAvatarsDidChange is posted. Main queue only.
+- (UIImage*)avatarForMxc:(const std::string&)mxc;
 
 // The user's devices other than this one
 - (void)fetchDevicesOfUser:(NSString*)userId completion:(void (^)(std::vector<HSDevice> devices, NSString* error))completion;

@@ -8,6 +8,7 @@ namespace {
 
 NSURLSession* Session() {
     static NSURLSession* session = [] {
+        // Ephemeral and without a URL cache: avatars have their own cache in the app
         NSURLSessionConfiguration* config = NSURLSessionConfiguration.ephemeralSessionConfiguration;
         // Long enough for a /sync long poll (the client asks for at most 30 s) plus the network
         config.timeoutIntervalForRequest = 90;
@@ -33,7 +34,7 @@ THttpResponse TUrlSessionHttp::Send(const THttpRequest& request) {
         [urlRequest setValue:bearer forHTTPHeaderField:@"Authorization"];
     }
     if (!request.Body.empty() || request.Method != "GET") {
-        [urlRequest setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+        [urlRequest setValue:[NSString stringWithUTF8String:request.ContentType.c_str()] forHTTPHeaderField:@"Content-Type"];
         urlRequest.HTTPBody = [NSData dataWithBytes:request.Body.data() length:request.Body.size()];
     }
 

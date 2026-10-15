@@ -124,7 +124,7 @@ THttpResponse TUnixHttp::Send(const THttpRequest& request) {
         out += "Authorization: Bearer " + request.AccessToken + "\r\n";
     }
     if (!request.Body.empty() || request.Method != "GET") {
-        out += "Content-Type: application/json\r\nContent-Length: " + std::to_string(request.Body.size()) + "\r\n";
+        out += "Content-Type: " + request.ContentType + "\r\nContent-Length: " + std::to_string(request.Body.size()) + "\r\n";
     }
     out += "\r\n" + request.Body;
 

@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,7 @@ struct THttpRequest {
     std::string Url;
     std::string AccessToken;  // sent as a bearer token when not empty
     std::string Body;         // JSON, empty for GET
+    std::string ContentType = "application/json";  // of the body
 };
 
 struct THttpResponse {
@@ -82,6 +84,14 @@ public:
     // Sends an m.text message and returns the event id. The transaction id makes a retry idempotent.
     std::string SendText(const std::string& roomId, const std::string& text, const std::string& txnId);
 
+    // Uploads a file to the content repository; returns its mxc:// URI
+    std::string UploadMedia(const std::string& bytes, const std::string& contentType);
+    // A thumbnail of an mxc:// image, cropped to size x size pixels, through the authenticated media API.
+    // Returns the image bytes; throws TMatrixError for a malformed URI or when the server has no thumbnail.
+    std::string FetchThumbnail(const std::string& mxc, int size);
+    // Sets the user's avatar in their profile, which the server copies into their member events
+    void SetAvatarUrl(const std::string& mxc);
+
     const TSyncState& State() const { return State_; }
     const std::string& UserId() const { return UserId_; }
     const std::string& DeviceId() const { return DeviceId_; }
@@ -100,5 +110,14 @@ private:
 
 // Percent-encodes a path segment or a query value (room ids contain '!' and ':')
 std::string UrlEncode(const std::string& s);
+
+// The server name and media id of an mxc://server/id URI, if it has the spec's form: the media id only
+// letters, digits, '_' and '-', the server name a host with an optional port. Anything else (a path, a
+// query, "..") could steer the request elsewhere, so it is refused.
+struct TMxc {
+    std::string Server;
+    std::string MediaId;
+};
+std::optional<TMxc> ParseMxc(const std::string& uri);
 
 } // namespace NHoshi

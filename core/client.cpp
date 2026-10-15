@@ -184,4 +184,65 @@ std::string TClient::SendText(const std::string& roomId, const std::string& text
     return response.StringOr("event_id");
 }
 
+std::optional<TMxc> ParseMxc(const std::string& uri) {
+    static const std::string Prefix = "mxc://";
+    if (uri.rfind(Prefix, 0) != 0) {
+        return std::nullopt;
+    }
+    const size_t slash = uri.find('/', Prefix.size());
+    if (slash == std::string::npos) {
+        return std::nullopt;
+    }
+    TMxc mxc{uri.substr(Prefix.size(), slash - Prefix.size()), uri.substr(slash + 1)};
+    auto isAlnum = [](char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); };
+    // A DNS name, an IPv4 address or a bracketed IPv6 one, with an optional port
+    for (const char c : mxc.Server) {
+        if (!isAlnum(c) && c != '.' && c != '-' && c != ':' && c != '[' && c != ']') {
+            return std::nullopt;
+        }
+    }
+    for (const char c : mxc.MediaId) {
+        if (!isAlnum(c) && c != '_' && c != '-') {
+            return std::nullopt;
+        }
+    }
+    if (mxc.Server.empty() || mxc.MediaId.empty() || mxc.Server.find("..") != std::string::npos) {
+        return std::nullopt;
+    }
+    return mxc;
+}
+
+std::string TClient::UploadMedia(const std::string& bytes, const std::string& contentType) {
+    THttpRequest request{"POST", Homeserver + "/_matrix/media/v3/upload", AccessToken_, bytes, contentType};
+    const THttpResponse response = Http->Send(request);
+    if (response.Status < 200 || response.Status >= 300) {
+        throw TMatrixError(response.Status, {}, "upload failed: HTTP " + std::to_string(response.Status));
+    }
+    const std::string uri = TJson::Parse(response.Body).StringOr("content_uri");
+    if (!ParseMxc(uri)) {
+        throw TMatrixError(response.Status, {}, "upload returned no content_uri");
+    }
+    return uri;
+}
+
+std::string TClient::FetchThumbnail(const std::string& mxc, int size) {
+    const auto parsed = ParseMxc(mxc);
+    if (!parsed) {
+        throw TMatrixError(0, {}, "not a valid mxc URI");
+    }
+    const std::string query = "?width=" + std::to_string(size) + "&height=" + std::to_string(size) + "&method=crop";
+    THttpRequest request{"GET", Homeserver + "/_matrix/client/v1/media/thumbnail/" + UrlEncode(parsed->Server) + "/" +
+        UrlEncode(parsed->MediaId) + query, AccessToken_, {}};
+    const THttpResponse response = Http->Send(request);
+    if (response.Status < 200 || response.Status >= 300 || response.Body.empty()) {
+        throw TMatrixError(response.Status, {}, "no thumbnail: HTTP " + std::to_string(response.Status));
+    }
+    return response.Body;
+}
+
+void TClient::SetAvatarUrl(const std::string& mxc) {
+    const TJson body(TJson::TObject{{"avatar_url", mxc}});
+    Call("PUT", "/_matrix/client/v3/profile/" + UrlEncode(UserId_) + "/avatar_url", &body);
+}
+
 } // namespace NHoshi

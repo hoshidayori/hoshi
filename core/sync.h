@@ -46,6 +46,8 @@ struct TRoom {
     // Joined and invited users, from m.room.member; in an encrypted room their devices get the room key
     std::set<std::string> Members;
     std::map<std::string, std::string> MemberNames;  // user id -> display name, when the member set one
+    std::map<std::string, std::string> MemberAvatars;  // user id -> mxc:// URI of the avatar, when there is one
+    std::string AvatarUrl;  // the room's own avatar from m.room.avatar, an mxc:// URI
     std::string CanonicalAlias;
     std::vector<std::string> Heroes;  // from the /sync room summary: the members to name an unnamed room after
 

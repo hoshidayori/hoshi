@@ -136,10 +136,14 @@ int main() {
     state.Apply(TJson::Parse(R"({"rooms": {"join": {"!dm:example.com": {
         "summary": {"m.heroes": ["@alice:example.com"]},
         "state": {"events": [
-            {"type": "m.room.member", "state_key": "@alice:example.com", "sender": "@alice:example.com", "content": {"membership": "join", "displayname": "Алиса"}},
+            {"type": "m.room.member", "state_key": "@alice:example.com", "sender": "@alice:example.com", "content": {"membership": "join", "displayname": "Алиса", "avatar_url": "mxc://example.com/alicepic"}},
+            {"type": "m.room.avatar", "state_key": "", "sender": "@alice:example.com", "content": {"url": "mxc://example.com/roompic"}},
             {"type": "m.room.member", "state_key": "@me:example.com", "sender": "@me:example.com", "content": {"membership": "join"}}
         ]}, "timeline": {"events": []}}}}})"));
     Expect(state.Rooms.at("!dm:example.com").DisplayName("@me:example.com") == "Алиса", "direct chat is named after the other person");
+    Expect(state.Rooms.at("!dm:example.com").MemberAvatars.at("@alice:example.com") == "mxc://example.com/alicepic" &&
+        !state.Rooms.at("!dm:example.com").MemberAvatars.count("@me:example.com"), "member avatars");
+    Expect(state.Rooms.at("!dm:example.com").AvatarUrl == "mxc://example.com/roompic", "room avatar");
     TRoom group;
     group.Members = {"@me:x", "@a:x", "@b:x", "@c:x", "@d:x"};
     Expect(group.DisplayName("@me:x") == "@a:x, @b:x, @c:x and 1 other", "group of members");

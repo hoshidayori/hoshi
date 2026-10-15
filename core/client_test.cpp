@@ -113,6 +113,30 @@ int main() {
     client.Logout();
     Expect(client.AccessToken().empty(), "logout with an already invalid token succeeds");
 
+    // Media URIs: only the spec's form, nothing that could change the request path
+    Expect(ParseMxc("mxc://example.com:8448/AbC_12-x").has_value() && ParseMxc("mxc://example.com:8448/AbC_12-x")->Server == "example.com:8448",
+        "mxc with a port");
+    Expect(ParseMxc("mxc://[::1]/abc").has_value(), "mxc with an IPv6 server");
+    for (const char* bad : {"https://example.com/abc", "mxc://example.com", "mxc://example.com/", "mxc:///abc",
+             "mxc://example.com/a/b", "mxc://example.com/../x", "mxc://ex/ample.com?q", "mxc://evil.com%2F/x", "mxc://a..b/x"}) {
+        Expect(!ParseMxc(bad), bad);
+    }
+    client.Restore("@yuki:example.com", "HOSHI1", "syt_new");
+    http->Responses.push_back({200, std::string("\x89PNG\r\n\x1a\n\0rest", 13)});
+    const std::string thumbnail = client.FetchThumbnail("mxc://example.com:8448/AbC_12-x", 96);
+    Expect(http->Requests.back().Url ==
+        "https://example.com/_matrix/client/v1/media/thumbnail/example.com%3A8448/AbC_12-x?width=96&height=96&method=crop",
+        "thumbnail through the authenticated media API");
+    Expect(http->Requests.back().AccessToken == "syt_new", "thumbnail sends the token");
+    Expect(thumbnail.size() == 13 && thumbnail[8] == '\0', "thumbnail bytes come back whole, zero bytes included");
+    bool refused = false;
+    try {
+        client.FetchThumbnail("mxc://example.com/../../_matrix/client/v3/logout", 96);
+    } catch (const TMatrixError&) {
+        refused = true;
+    }
+    Expect(refused, "a malformed mxc is not fetched");
+
     if (Failures == 0) {
         std::printf("client_test: all passed\n");
     }

@@ -76,6 +76,7 @@ struct TWorker {
 NSNotificationName const HSSessionStateDidChange = @"HSSessionStateDidChange";
 NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAuthorization";
 NSNotificationName const HSSessionVerificationDidChange = @"HSSessionVerificationDidChange";
+NSNotificationName const HSSessionAvatarsDidChange = @"HSSessionAvatarsDidChange";
 
 namespace {
 
@@ -95,7 +96,11 @@ std::int64_t NowMs() {
     std::unique_ptr<TWorker> _sync;
     std::unique_ptr<TWorker> _send;
     std::unique_ptr<TWorker> _history;
+    std::unique_ptr<TWorker> _media;
     std::shared_ptr<std::atomic<bool>> _syncing;
+    // Avatars by mxc URI, main queue only: pictures in memory, and the ones being fetched or not available
+    NSCache<NSString*, UIImage*>* _avatars;
+    NSMutableSet<NSString*>* _avatarsAsked;
 
     // The rooms, written by the sync and history queues. Network calls happen outside the lock.
     std::mutex _coreMutex;
@@ -122,13 +127,16 @@ std::int64_t NowMs() {
         _sync = std::make_unique<TWorker>("hoshi.sync", http, hs);
         _send = std::make_unique<TWorker>("hoshi.send", http, hs);
         _history = std::make_unique<TWorker>("hoshi.history", http, hs);
+        _media = std::make_unique<TWorker>("hoshi.media", http, hs);
         _syncing = std::make_shared<std::atomic<bool>>(false);
+        _avatars = [[NSCache alloc] init];
+        _avatarsAsked = [NSMutableSet set];
     }
     return self;
 }
 
 - (void)restoreWorkersUser:(const std::string&)userId device:(const std::string&)device token:(const std::string&)token {
-    for (TWorker* worker : {_send.get(), _history.get()}) {
+    for (TWorker* worker : {_send.get(), _history.get(), _media.get()}) {
         dispatch_sync(worker->Queue, ^{
             worker->Client->Restore(userId, device, token);
         });
@@ -542,6 +550,71 @@ std::int64_t NowMs() {
         }
         [self publish:snapshot];
     });
+}
+
+#pragma mark - Avatars
+
+// Library/Caches/avatars/<server>_<media id>: the system may clear it, then they are fetched again
+static NSURL* AvatarFile(const NHoshi::TMxc& mxc) {
+    NSURL* caches = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+    NSURL* folder = [caches URLByAppendingPathComponent:@"avatars" isDirectory:YES];
+    [NSFileManager.defaultManager createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:nil];
+    // ParseMxc allows only letters, digits and ".-_:[]"; the last three become "_" in a file name
+    std::string name = mxc.Server + "_" + mxc.MediaId;
+    for (char& c : name) {
+        if (c == ':' || c == '[' || c == ']') {
+            c = '_';
+        }
+    }
+    return [folder URLByAppendingPathComponent:@(name.c_str())];
+}
+
+- (UIImage*)avatarForMxc:(const std::string&)uri {
+    const auto mxc = NHoshi::ParseMxc(uri);
+    if (!mxc) {
+        return nil;
+    }
+    NSString* key = @(uri.c_str());
+    if (UIImage* image = [_avatars objectForKey:key]) {
+        return image;
+    }
+    NSURL* file = AvatarFile(*mxc);
+    if (UIImage* image = [UIImage imageWithContentsOfFile:file.path]) {
+        [_avatars setObject:image forKey:key];
+        return image;
+    }
+    if ([_avatarsAsked containsObject:key]) {
+        return nil;  // on its way, or the server has none: the letter stays
+    }
+    [_avatarsAsked addObject:key];
+    const std::string mxcUri = uri;
+    __weak HSSession* weakSelf = self;
+    dispatch_async(_media->Queue, ^{
+        HSSession* strongSelf = weakSelf;
+        if (!strongSelf) {
+            return;
+        }
+        NSData* data = nil;
+        try {
+            // Twice the drawn size, for sharp circles on Retina screens
+            const std::string bytes = strongSelf->_media->Client->FetchThumbnail(mxcUri, 96);
+            data = [NSData dataWithBytes:bytes.data() length:bytes.size()];
+        } catch (const NHoshi::TMatrixError& e) {
+            NSLog(@"Hoshi: no avatar %s: %s", mxcUri.c_str(), e.what());
+        }
+        UIImage* image = data ? [UIImage imageWithData:data] : nil;
+        if (image) {
+            [data writeToURL:file atomically:YES];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            HSSession* session = weakSelf;
+            if (session && image) {
+                [session->_avatars setObject:image forKey:key];
+                [NSNotificationCenter.defaultCenter postNotificationName:HSSessionAvatarsDidChange object:session];
+            }
+        });
+    });
+    return nil;
 }
 
 #pragma mark - Device verification
