@@ -216,7 +216,7 @@ static const CGFloat MaxInputLines = 6;
         return;
     }
     const NHoshi::TRoom& room = it->second;
-    self.title = room.Name.empty() ? ToNs(_roomId) : ToNs(room.Name);
+    self.title = ToNs(room.DisplayName(_session.userId.UTF8String));
     _hasOlder = !room.HistoryComplete;
 
     const bool first = _messages.empty();

@@ -100,7 +100,7 @@ NSString* ToNs(const std::string& s) {
     if ([self isInviteSection:indexPath.section]) {
         const auto& invite = _session.state.Invites.at(_inviteIds[static_cast<size_t>(indexPath.row)]);
         UIListContentConfiguration* content = UIListContentConfiguration.subtitleCellConfiguration;
-        content.text = invite.Name.empty() ? ToNs(invite.RoomId) : ToNs(invite.Name);
+        content.text = invite.Name.empty() ? [NSString stringWithFormat:@"Chat with %@", ToNs(invite.Inviter)] : ToNs(invite.Name);
         content.secondaryText = [NSString stringWithFormat:@"Invited by %@", ToNs(invite.Inviter)];
         content.image = [UIImage systemImageNamed:invite.Encrypted ? @"lock.fill" : @"envelope"];
         cell.contentConfiguration = content;
@@ -109,7 +109,7 @@ NSString* ToNs(const std::string& s) {
     }
     const auto& room = _session.state.Rooms.at(_roomIds[static_cast<size_t>(indexPath.row)]);
     UIListContentConfiguration* content = UIListContentConfiguration.subtitleCellConfiguration;
-    content.text = room.Name.empty() ? ToNs(room.Id) : ToNs(room.Name);
+    content.text = ToNs(room.DisplayName(_session.userId.UTF8String));
     if (!room.Timeline.empty()) {
         const auto& last = room.Timeline.back();
         content.secondaryText = last.IsWaitingForKey() ? @"🔒 Encrypted message" : ToNs(last.Body);
@@ -129,7 +129,7 @@ NSString* ToNs(const std::string& s) {
     if ([self isInviteSection:indexPath.section]) {
         const std::string roomId = _inviteIds[static_cast<size_t>(indexPath.row)];
         const auto& invite = _session.state.Invites.at(roomId);
-        UIAlertController* sheet = [UIAlertController alertControllerWithTitle:invite.Name.empty() ? ToNs(roomId) : ToNs(invite.Name)
+        UIAlertController* sheet = [UIAlertController alertControllerWithTitle:invite.Name.empty() ? [NSString stringWithFormat:@"Chat with %@", ToNs(invite.Inviter)] : ToNs(invite.Name)
             message:[NSString stringWithFormat:@"Invited by %@", ToNs(invite.Inviter)] preferredStyle:UIAlertControllerStyleActionSheet];
         void (^report)(NSString*) = ^(NSString* error) {
             if (error) {

@@ -1,5 +1,6 @@
 #include "sync.h"
 
+#include <algorithm>
 #include <optional>
 #include <unordered_set>
 
@@ -14,12 +15,21 @@ void ApplyStateEvent(TRoom& room, const TJson& event) {
         room.Name = event["content"].StringOr("name");
     } else if (type == "m.room.encryption") {
         room.Encrypted = true;
+    } else if (type == "m.room.canonical_alias" && event["state_key"].IsString() && event["state_key"].AsString().empty()) {
+        room.CanonicalAlias = event["content"].StringOr("alias");
     } else if (type == "m.room.member" && event["state_key"].IsString()) {
+        const std::string& user = event["state_key"].AsString();
         const std::string membership = event["content"].StringOr("membership");
         if (membership == "join" || membership == "invite") {
-            room.Members.insert(event["state_key"].AsString());
+            room.Members.insert(user);
+            const std::string name = event["content"].StringOr("displayname");
+            if (name.empty()) {
+                room.MemberNames.erase(user);
+            } else {
+                room.MemberNames[user] = name;
+            }
         } else {
-            room.Members.erase(event["state_key"].AsString());
+            room.Members.erase(user);
         }
     }
 }
@@ -90,6 +100,40 @@ TMessage* FindPending(std::map<std::string, TRoom>& rooms, const std::string& ro
 
 } // namespace
 
+std::string TRoom::DisplayName(const std::string& ownUserId) const {
+    if (!Name.empty()) {
+        return Name;
+    }
+    if (!CanonicalAlias.empty()) {
+        return CanonicalAlias;
+    }
+    std::vector<std::string> others = Heroes;
+    if (others.empty()) {
+        for (const auto& member : Members) {
+            if (member != ownUserId) {
+                others.push_back(member);
+            }
+        }
+    }
+    if (others.empty()) {
+        return "Empty room";
+    }
+    auto nameOf = [this](const std::string& user) {
+        const auto it = MemberNames.find(user);
+        return it == MemberNames.end() ? user : it->second;
+    };
+    std::string name = nameOf(others[0]);
+    const size_t shown = std::min<size_t>(others.size(), 3);
+    for (size_t i = 1; i < shown; ++i) {
+        name += (i + 1 == shown && others.size() <= 3 ? " and " : ", ") + nameOf(others[i]);
+    }
+    if (others.size() > 3) {
+        const size_t rest = others.size() - 3;
+        name += " and " + std::to_string(rest) + (rest == 1 ? " other" : " others");
+    }
+    return name;
+}
+
 void TSyncState::Apply(const TJson& response) {
     if (response["next_batch"].IsString()) {
         NextBatch = response["next_batch"].AsString();
@@ -132,6 +176,15 @@ void TSyncState::Apply(const TJson& response) {
         const bool seenBefore = Rooms.count(roomId) != 0;
         TRoom& room = Rooms[roomId];
         room.Id = roomId;
+        const TJson& heroes = data["summary"]["m.heroes"];
+        if (heroes.IsArray()) {
+            room.Heroes.clear();
+            for (const auto& hero : heroes.AsArray()) {
+                if (hero.IsString()) {
+                    room.Heroes.push_back(hero.AsString());
+                }
+            }
+        }
         const TJson& state = data["state"]["events"];
         if (state.IsArray()) {
             for (const auto& event : state.AsArray()) {

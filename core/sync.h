@@ -42,6 +42,13 @@ struct TRoom {
     std::vector<TMessage> Pending;
     // Joined and invited users, from m.room.member; in an encrypted room their devices get the room key
     std::set<std::string> Members;
+    std::map<std::string, std::string> MemberNames;  // user id -> display name, when the member set one
+    std::string CanonicalAlias;
+    std::vector<std::string> Heroes;  // from the /sync room summary: the members to name an unnamed room after
+
+    // The name to show, as the spec's "Calculating the display name for a room": the room name, else its
+    // canonical alias, else the heroes or other members, e.g. a direct chat is called after the other person
+    std::string DisplayName(const std::string& ownUserId) const;
 };
 
 // A room the user is invited to, from the stripped state the invite carries

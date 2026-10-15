@@ -130,6 +130,21 @@ int main() {
     Expect(echoed.Pending.empty(), "echo by transaction id and by event id clears pending");
     Expect(echoed.Timeline.back().Body == "и это" && echoed.Timeline.back().SendState == TMessage::ESendState::Sent, "echo is in the timeline");
 
+    // Display names of unnamed rooms
+    state.Apply(TJson::Parse(R"({"rooms": {"join": {"!dm:example.com": {
+        "summary": {"m.heroes": ["@alice:example.com"]},
+        "state": {"events": [
+            {"type": "m.room.member", "state_key": "@alice:example.com", "sender": "@alice:example.com", "content": {"membership": "join", "displayname": "Алиса"}},
+            {"type": "m.room.member", "state_key": "@me:example.com", "sender": "@me:example.com", "content": {"membership": "join"}}
+        ]}, "timeline": {"events": []}}}}})"));
+    Expect(state.Rooms.at("!dm:example.com").DisplayName("@me:example.com") == "Алиса", "direct chat is named after the other person");
+    TRoom group;
+    group.Members = {"@me:x", "@a:x", "@b:x", "@c:x", "@d:x"};
+    Expect(group.DisplayName("@me:x") == "@a:x, @b:x, @c:x and 1 other", "group of members");
+    group.CanonicalAlias = "#звёзды:x";
+    Expect(group.DisplayName("@me:x") == "#звёзды:x", "alias before members");
+    Expect(TRoom{}.DisplayName("@me:x") == "Empty room", "no one else");
+
     // Invites from stripped state, gone once joined
     state.Apply(TJson::Parse(R"({"rooms": {"invite": {"!inv:example.com": {"invite_state": {"events": [
         {"type": "m.room.name", "state_key": "", "sender": "@carol:example.com", "content": {"name": "Приглашение"}},
