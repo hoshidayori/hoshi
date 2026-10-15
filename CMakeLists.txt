@@ -32,6 +32,30 @@ if(HOSHI_SANITIZE)
     target_link_options(hoshi_core PUBLIC -fsanitize=address,undefined)
 endif()
 
+# Cryptography on top of OpenSSL's libcrypto. The desktop tests use the system's OpenSSL 3; the iOS app
+# links a static libcrypto built from source by third_party/build-openssl-ios.sh.
+if(HOSHI_IOS)
+    if(CMAKE_OSX_SYSROOT MATCHES "simulator")
+        set(HOSHI_OPENSSL ${CMAKE_SOURCE_DIR}/third_party/openssl/iphonesimulator)
+    else()
+        set(HOSHI_OPENSSL ${CMAKE_SOURCE_DIR}/third_party/openssl/iphoneos)
+    endif()
+    if(NOT EXISTS ${HOSHI_OPENSSL}/lib/libcrypto.a)
+        message(FATAL_ERROR "No OpenSSL for iOS in ${HOSHI_OPENSSL}: run third_party/build-openssl-ios.sh")
+    endif()
+    add_library(hoshi_openssl STATIC IMPORTED)
+    set_target_properties(hoshi_openssl PROPERTIES
+        IMPORTED_LOCATION ${HOSHI_OPENSSL}/lib/libcrypto.a
+        INTERFACE_INCLUDE_DIRECTORIES ${HOSHI_OPENSSL}/include)
+else()
+    find_package(OpenSSL 3 REQUIRED)
+    add_library(hoshi_openssl ALIAS OpenSSL::Crypto)
+endif()
+add_library(hoshi_crypto core/crypto.cpp core/megolm.cpp core/olm.cpp core/e2ee.cpp)
+target_include_directories(hoshi_crypto PUBLIC core)
+target_link_libraries(hoshi_crypto PUBLIC hoshi_openssl hoshi_core)
+target_compile_options(hoshi_crypto PRIVATE -Wall -Wextra -Werror)
+
 if(HOSHI_IOS)
     # Simulator build without Xcode (works in a sandbox that keeps ~/Library read-only):
     # cmake -S . -B build-sim -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT=iphonesimulator -DCMAKE_OSX_ARCHITECTURES=arm64
@@ -48,7 +72,7 @@ if(HOSHI_IOS)
     )
     target_include_directories(Hoshi PRIVATE app)
     target_link_libraries(Hoshi PRIVATE "-framework Security")
-    target_link_libraries(Hoshi PRIVATE hoshi_core "-framework UIKit" "-framework Foundation" "-framework CoreGraphics" "-framework Security")
+    target_link_libraries(Hoshi PRIVATE hoshi_crypto hoshi_core "-framework UIKit" "-framework Foundation" "-framework CoreGraphics" "-framework Security")
     target_compile_options(Hoshi PRIVATE -fobjc-arc -Wall -Wextra -Werror)
     set_target_properties(Hoshi PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/app/Info.plist
@@ -63,13 +87,6 @@ if(HOSHI_IOS)
 endif()
 
 enable_testing()
-
-# Cryptography on top of OpenSSL; for now only for the desktop tests, the iOS app needs its own OpenSSL build
-find_package(OpenSSL 3 REQUIRED)
-add_library(hoshi_crypto core/crypto.cpp core/megolm.cpp core/olm.cpp core/e2ee.cpp)
-target_include_directories(hoshi_crypto PUBLIC core)
-target_link_libraries(hoshi_crypto PUBLIC OpenSSL::Crypto hoshi_core)
-target_compile_options(hoshi_crypto PRIVATE -Wall -Wextra -Werror)
 
 add_executable(crypto_test core/crypto_test.cpp)
 target_link_libraries(crypto_test PRIVATE hoshi_crypto)

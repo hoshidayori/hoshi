@@ -3,6 +3,10 @@ NOTES.md
 build/
 build-sim/
 build-device/
+# OpenSSL source archive and build output; third_party/build-openssl-ios.sh recreates them
+third_party/src/
+third_party/build/
+third_party/openssl/
 screenshots/
 *.log
 # Local check that the Swift SDK package downloads; not part of the client
