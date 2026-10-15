@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace NHoshi {
 
@@ -67,6 +68,16 @@ public:
     std::string CreatePublicRoom(const std::string& name);
     void JoinRoom(const std::string& roomIdOrAlias);
     void LeaveRoom(const std::string& roomId);
+
+    // End-to-end encryption endpoints; bodies and responses as in the spec
+    TJson UploadKeys(const TJson& body);                       // POST /keys/upload
+    TJson QueryKeys(const std::vector<std::string>& userIds);  // POST /keys/query
+    TJson ClaimKeys(const TJson& oneTimeKeys);                 // POST /keys/claim, user -> device -> algorithm
+    void SendToDevice(const std::string& type, const TJson& messages, const std::string& txnId);
+    // Any room event; returns the event id
+    std::string SendEvent(const std::string& roomId, const std::string& type, const TJson& content, const std::string& txnId);
+    // Creates a private room with m.room.encryption (Megolm) in its initial state, inviting the given users
+    std::string CreateEncryptedRoom(const std::string& name, const std::vector<std::string>& invite);
 
     // Sends an m.text message and returns the event id. The transaction id makes a retry idempotent.
     std::string SendText(const std::string& roomId, const std::string& text, const std::string& txnId);

@@ -129,6 +129,54 @@ void TClient::LeaveRoom(const std::string& roomId) {
     Call("POST", "/_matrix/client/v3/rooms/" + UrlEncode(roomId) + "/leave", &body);
 }
 
+TJson TClient::UploadKeys(const TJson& body) {
+    return Call("POST", "/_matrix/client/v3/keys/upload", &body);
+}
+
+TJson TClient::QueryKeys(const std::vector<std::string>& userIds) {
+    TJson::TObject users;
+    for (const auto& id : userIds) {
+        users[id] = TJson(TJson::TArray{});  // an empty list asks for all devices
+    }
+    const TJson body(TJson::TObject{{"device_keys", TJson(std::move(users))}});
+    return Call("POST", "/_matrix/client/v3/keys/query", &body);
+}
+
+TJson TClient::ClaimKeys(const TJson& oneTimeKeys) {
+    const TJson body(TJson::TObject{{"one_time_keys", oneTimeKeys}});
+    return Call("POST", "/_matrix/client/v3/keys/claim", &body);
+}
+
+void TClient::SendToDevice(const std::string& type, const TJson& messages, const std::string& txnId) {
+    const TJson body(TJson::TObject{{"messages", messages}});
+    Call("PUT", "/_matrix/client/v3/sendToDevice/" + UrlEncode(type) + "/" + UrlEncode(txnId), &body);
+}
+
+std::string TClient::SendEvent(const std::string& roomId, const std::string& type, const TJson& content, const std::string& txnId) {
+    const TJson response = Call("PUT",
+        "/_matrix/client/v3/rooms/" + UrlEncode(roomId) + "/send/" + UrlEncode(type) + "/" + UrlEncode(txnId), &content);
+    return response.StringOr("event_id");
+}
+
+std::string TClient::CreateEncryptedRoom(const std::string& name, const std::vector<std::string>& invite) {
+    TJson::TArray invitees(invite.begin(), invite.end());
+    const TJson body(TJson::TObject{
+        {"name", name},
+        {"preset", "private_chat"},
+        {"invite", TJson(std::move(invitees))},
+        {"initial_state", TJson::TArray{TJson::TObject{
+            {"type", "m.room.encryption"},
+            {"state_key", ""},
+            {"content", TJson::TObject{{"algorithm", "m.megolm.v1.aes-sha2"}}},
+        }}},
+    });
+    const TJson response = Call("POST", "/_matrix/client/v3/createRoom", &body);
+    if (!response["room_id"].IsString()) {
+        throw TMatrixError(200, {}, "createRoom response has no room_id");
+    }
+    return response["room_id"].AsString();
+}
+
 std::string TClient::SendText(const std::string& roomId, const std::string& text, const std::string& txnId) {
     const TJson body(TJson::TObject{{"msgtype", "m.text"}, {"body", text}});
     const TJson response = Call("PUT",

@@ -66,7 +66,7 @@ enable_testing()
 
 # Cryptography on top of OpenSSL; for now only for the desktop tests, the iOS app needs its own OpenSSL build
 find_package(OpenSSL 3 REQUIRED)
-add_library(hoshi_crypto core/crypto.cpp core/megolm.cpp core/olm.cpp)
+add_library(hoshi_crypto core/crypto.cpp core/megolm.cpp core/olm.cpp core/e2ee.cpp)
 target_include_directories(hoshi_crypto PUBLIC core)
 target_link_libraries(hoshi_crypto PUBLIC OpenSSL::Crypto hoshi_core)
 target_compile_options(hoshi_crypto PRIVATE -Wall -Wextra -Werror)
@@ -126,3 +126,9 @@ target_link_libraries(e2e_test PRIVATE hoshi_core)
 target_compile_options(e2e_test PRIVATE -Wall -Wextra -Werror)
 add_test(NAME e2e_test COMMAND e2e_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/synapse/data)
 set_tests_properties(e2e_test PROPERTIES LABELS synapse)
+
+add_executable(e2ee_e2e_test core/e2ee_e2e_test.cpp)
+target_link_libraries(e2ee_e2e_test PRIVATE hoshi_crypto hoshi_core)
+target_compile_options(e2ee_e2e_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME e2ee_e2e_test COMMAND e2ee_e2e_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/synapse/data)
+set_tests_properties(e2ee_e2e_test PROPERTIES LABELS synapse)
