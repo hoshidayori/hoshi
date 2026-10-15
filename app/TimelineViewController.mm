@@ -339,7 +339,16 @@ static const CGFloat MaxInputLines = 6;
     }
     UILabel* status = [cell.contentView viewWithTag:3];
     sender.text = ToNs(message.Sender);
-    body.text = ToNs(message.Body);
+    if (message.IsWaitingForKey()) {
+        // The room key has not arrived (yet): the sender's device may still be sharing it, or never will
+        body.text = @"🔒 Waiting for the key to decrypt this message";
+        body.textColor = UIColor.secondaryLabelColor;
+        body.font = [UIFont italicSystemFontOfSize:[UIFont preferredFontForTextStyle:UIFontTextStyleBody].pointSize];
+    } else {
+        body.text = ToNs(message.Body);
+        body.textColor = UIColor.labelColor;
+        body.font = [UIFont preferredFontForTextStyle:UIFontTextStyleBody];
+    }
     switch (message.SendState) {
         case NHoshi::TMessage::ESendState::Sent:
             body.alpha = 1;

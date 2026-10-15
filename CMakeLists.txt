@@ -35,7 +35,8 @@ endif()
 # Cryptography on top of OpenSSL's libcrypto. The desktop tests use the system's OpenSSL 3; the iOS app
 # links a static libcrypto built from source by third_party/build-openssl-ios.sh.
 if(HOSHI_IOS)
-    if(CMAKE_OSX_SYSROOT MATCHES "simulator")
+    # The sysroot is "iphonesimulator" or a path like .../iPhoneSimulator26.5.sdk
+    if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
         set(HOSHI_OPENSSL ${CMAKE_SOURCE_DIR}/third_party/openssl/iphonesimulator)
     else()
         set(HOSHI_OPENSSL ${CMAKE_SOURCE_DIR}/third_party/openssl/iphoneos)

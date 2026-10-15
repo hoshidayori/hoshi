@@ -79,10 +79,13 @@ NSString* ToNs(const std::string& s) {
     const auto& room = _session.state.Rooms.at(_roomIds[static_cast<size_t>(indexPath.row)]);
     UIListContentConfiguration* content = UIListContentConfiguration.subtitleCellConfiguration;
     content.text = room.Name.empty() ? ToNs(room.Id) : ToNs(room.Name);
+    if (!room.Timeline.empty()) {
+        const auto& last = room.Timeline.back();
+        content.secondaryText = last.IsWaitingForKey() ? @"🔒 Encrypted message" : ToNs(last.Body);
+    }
     if (room.Encrypted) {
-        content.secondaryText = @"Encrypted — not supported yet";
-    } else if (!room.Timeline.empty()) {
-        content.secondaryText = ToNs(room.Timeline.back().Body);
+        content.image = [UIImage systemImageNamed:@"lock.fill"];
+        content.imageProperties.tintColor = UIColor.secondaryLabelColor;
     }
     content.secondaryTextProperties.numberOfLines = 1;
     cell.contentConfiguration = content;
