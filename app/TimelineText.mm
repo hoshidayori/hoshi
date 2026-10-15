@@ -112,6 +112,21 @@ UIFont* TimeFont() {
 
 @end
 
+// One line of a selection, as tight as the text on it
+@interface HSSelectionRect : UITextSelectionRect
+@property (nonatomic) CGRect lineRect;
+@property (nonatomic) BOOL start;
+@property (nonatomic) BOOL end;
+@end
+
+@implementation HSSelectionRect
+- (CGRect)rect { return _lineRect; }
+- (NSWritingDirection)writingDirection { return NSWritingDirectionNatural; }
+- (BOOL)containsStart { return _start; }
+- (BOOL)containsEnd { return _end; }
+- (BOOL)isVertical { return NO; }
+@end
+
 @interface HSTimelineTextView () <NSTextLayoutManagerDelegate>
 @end
 
@@ -145,6 +160,41 @@ UIFont* TimeFont() {
     NSString* text = [[self.textStorage.string substringWithRange:range] stringByReplacingOccurrencesOfString:@" "
                                                                                                   withString:@"\n"];
     UIPasteboard.generalPasteboard.string = text;
+}
+
+// Over several lines UIKit paints from the selection's start to the right edge, whole lines in between and
+// the gaps between paragraphs, which across messages becomes one wide block over bubbles and margins. Here
+// each line gets a rectangle around its own selected text only.
+- (NSArray<UITextSelectionRect*>*)selectionRectsForRange:(UITextRange*)range {
+    NSArray<UITextSelectionRect*>* system = [super selectionRectsForRange:range];
+    NSTextContentManager* content = self.textLayoutManager.textContentManager;
+    const NSInteger start = [self offsetFromPosition:self.beginningOfDocument toPosition:range.start];
+    const NSInteger end = [self offsetFromPosition:self.beginningOfDocument toPosition:range.end];
+    id<NSTextLocation> from = [content locationFromLocation:content.documentRange.location withOffset:start];
+    id<NSTextLocation> to = [content locationFromLocation:content.documentRange.location withOffset:end];
+    NSTextRange* textRange = from && to ? [[NSTextRange alloc] initWithLocation:from endLocation:to] : nil;
+    if (!textRange || textRange.isEmpty) {
+        return system;
+    }
+    NSMutableArray<HSSelectionRect*>* rects = [NSMutableArray array];
+    const UIEdgeInsets inset = self.textContainerInset;
+    [self.textLayoutManager enumerateTextSegmentsInRange:textRange type:NSTextLayoutManagerSegmentTypeStandard
+        options:NSTextLayoutManagerSegmentOptionsNone
+        usingBlock:^BOOL(NSTextRange*, CGRect frame, CGFloat, NSTextContainer*) {
+            if (frame.size.width < 1) {
+                return YES;  // the line break at a paragraph's end: nothing to show
+            }
+            HSSelectionRect* rect = [[HSSelectionRect alloc] init];
+            rect.lineRect = CGRectOffset(frame, inset.left, inset.top);
+            [rects addObject:rect];
+            return YES;
+        }];
+    if (rects.count == 0) {
+        return system;
+    }
+    rects.firstObject.start = YES;
+    rects.lastObject.end = YES;
+    return rects;
 }
 
 - (nullable NSString*)failedTxnIdAtPoint:(CGPoint)point {

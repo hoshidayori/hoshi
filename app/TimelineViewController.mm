@@ -421,6 +421,7 @@ static const CGFloat MaxInputLines = 6;
     if (it == rooms.end() || !self.view.window) {
         return;
     }
+    const CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
     const NHoshi::TRoom& room = it->second;
     self.title = ToNs(room.DisplayName(_session.userId.UTF8String));
     _hasOlder = !room.HistoryComplete;
@@ -482,11 +483,47 @@ static const CGFloat MaxInputLines = 6;
     }
     [self loadOlderIfNeeded];
     [self updateToBottomButton];
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"HSStressHistory"]) {
+        [self stressHistoryAfterUpdateFrom:started anchor:first ? NSNotFound : moved(anchor)];
+    }
+}
+
+// "-HSStressHistory YES": keeps scrolling to the top until the whole history is loaded, and writes to
+// Documents/history.txt for every update the message count, the time it took, and whether the line that was
+// at the top of the screen stayed there
+- (void)stressHistoryAfterUpdateFrom:(CFAbsoluteTime)started anchor:(NSUInteger)anchor {
+    static NSMutableString* report = [NSMutableString string];
+    const double ms = (CFAbsoluteTimeGetCurrent() - started) * 1000;
+    NSString* stayed = @"-";
+    if (anchor != NSNotFound) {
+        const CGFloat top = _text.contentOffset.y + _text.adjustedContentInset.top - _text.textContainerInset.top;
+        NSTextLayoutFragment* fragment = [_text.textLayoutManager textLayoutFragmentForPosition:CGPointMake(HSBubbleSide * 2, MAX(top, 0))];
+        const NSUInteger now = fragment ? [self offsetOfLocation:fragment.rangeInElement.location] : NSNotFound;
+        stayed = now == anchor ? @"yes" : [NSString stringWithFormat:@"NO (%lu -> %lu)", static_cast<unsigned long>(anchor),
+                                                                      static_cast<unsigned long>(now)];
+    }
+    [report appendFormat:@"messages %zu, update %.1f ms, top line stayed %@, more %d\n", _keys.size(), ms, stayed, _hasOlder];
+    NSURL* documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    [report writeToURL:[documents URLByAppendingPathComponent:@"history.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    if (_hasOlder) {
+        // Like a user who scrolled up to read: a little below the very top, so the anchor has something to hold
+        __weak TimelineViewController* weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), dispatch_get_main_queue(), ^{
+            TimelineViewController* strongSelf = weakSelf;
+            if (strongSelf) {
+                strongSelf->_text.contentOffset = CGPointMake(0, 100 - strongSelf->_text.adjustedContentInset.top);
+                [strongSelf loadOlderIfNeeded];
+            }
+        });
+    }
 }
 
 // For screenshots from sim-run.sh: "-HSSelectLast N" selects the last N characters of the timeline, so a
 // selection across messages can be seen without touching the screen
 - (void)selectFromLaunchArguments {
+    if ([NSUserDefaults.standardUserDefaults boolForKey:@"HSHitTest"]) {
+        [self writeHitTest];
+    }
     const NSInteger count = [NSUserDefaults.standardUserDefaults integerForKey:@"HSSelectLast"];
     const NSUInteger length = _text.textStorage.length;
     if (count <= 0 || length == 0) {
@@ -495,6 +532,66 @@ static const CGFloat MaxInputLines = 6;
     const NSUInteger selected = std::min<NSUInteger>(static_cast<NSUInteger>(count), length);
     [_text becomeFirstResponder];
     _text.selectedRange = NSMakeRange(length - selected, selected);
+}
+
+// "-HSHitTest YES": for the middle of every line, which character a finger there would reach, against the
+// line's own characters; written to Documents/hittest.txt. A finger must land in the line it touches.
+- (void)writeHitTest {
+    [self layOutAll];
+    NSMutableString* report = [NSMutableString string];
+    [_text.textLayoutManager enumerateTextLayoutFragmentsFromLocation:_text.textLayoutManager.documentRange.location
+        options:NSTextLayoutFragmentEnumerationOptionsEnsuresLayout usingBlock:^BOOL(NSTextLayoutFragment* fragment) {
+            const NSUInteger start = [self offsetOfLocation:fragment.rangeInElement.location];
+            for (NSTextLineFragment* line in fragment.textLineFragments) {
+                const CGRect bounds = line.typographicBounds;
+                const CGPoint point = CGPointMake(
+                    fragment.layoutFragmentFrame.origin.x + CGRectGetMidX(bounds) + self->_text.textContainerInset.left,
+                    fragment.layoutFragmentFrame.origin.y + CGRectGetMidY(bounds) + self->_text.textContainerInset.top);
+                UITextPosition* hit = [self->_text closestPositionToPoint:point];
+                const NSInteger offset = [self->_text offsetFromPosition:self->_text.beginningOfDocument toPosition:hit];
+                const NSRange expected = NSMakeRange(start + static_cast<NSUInteger>(line.characterRange.location),
+                                                     static_cast<NSUInteger>(line.characterRange.length));
+                // The way TextKit 2's own selection gestures find a place: in text container coordinates
+                const CGPoint inContainer = CGPointMake(point.x - self->_text.textContainerInset.left, point.y - self->_text.textContainerInset.top);
+                NSTextLayoutManager* tlm = self->_text.textLayoutManager;
+                NSArray<NSTextSelection*>* selections = [tlm.textSelectionNavigation textSelectionsInteractingAtPoint:inContainer
+                    inContainerAtLocation:tlm.documentRange.location anchors:@[] modifiers:0 selecting:YES bounds:CGRectInfinite];
+                NSInteger navigation = -1;
+                if (id<NSTextLocation> location = selections.firstObject.textRanges.firstObject.location) {
+                    navigation = static_cast<NSInteger>([self offsetOfLocation:location]);
+                }
+                NSInteger lineStart = -1;
+                if (NSTextRange* range = [tlm lineFragmentRangeForPoint:inContainer inContainerAtLocation:tlm.documentRange.location]) {
+                    lineStart = static_cast<NSInteger>([self offsetOfLocation:range.location]);
+                }
+                auto inLine = [&](NSInteger at) {
+                    return at >= static_cast<NSInteger>(expected.location) && at <= static_cast<NSInteger>(NSMaxRange(expected));
+                };
+                const BOOL ok = inLine(offset) && inLine(navigation) && inLine(lineStart);
+                [report appendFormat:@"%@ y=%.1f expected %lu..%lu closest %ld navigation %ld line %ld \"%@\"\n", ok ? @"ok  " : @"MISS",
+                    point.y, static_cast<unsigned long>(expected.location), static_cast<unsigned long>(NSMaxRange(expected)),
+                    static_cast<long>(offset), static_cast<long>(navigation), static_cast<long>(lineStart),
+                    [line.attributedString.string substringWithRange:line.characterRange]];
+                // The caret the handles hang on: it should cover the line, not the space above the paragraph
+                const CGFloat lineTop = fragment.layoutFragmentFrame.origin.y + bounds.origin.y + self->_text.textContainerInset.top;
+                for (NSUInteger at : {expected.location, NSMaxRange(expected) > expected.location ? NSMaxRange(expected) - 1 : expected.location}) {
+                    UITextPosition* position = [self->_text positionFromPosition:self->_text.beginningOfDocument offset:static_cast<NSInteger>(at)];
+                    const CGRect caret = position ? [self->_text caretRectForPosition:position] : CGRectNull;
+                    [report appendFormat:@"     caret at %lu: y=%.1f h=%.1f; line y=%.1f h=%.1f\n", static_cast<unsigned long>(at),
+                        caret.origin.y, caret.size.height, lineTop, bounds.size.height];
+                }
+                NSArray<UITextSelectionRect*>* rects = [self->_text selectionRectsForRange:[self->_text textRangeFromPosition:
+                    [self->_text positionFromPosition:self->_text.beginningOfDocument offset:static_cast<NSInteger>(expected.location)]
+                    toPosition:[self->_text positionFromPosition:self->_text.beginningOfDocument offset:static_cast<NSInteger>(NSMaxRange(expected))]]];
+                for (UITextSelectionRect* rect in rects) {
+                    [report appendFormat:@"     selection rect y=%.1f h=%.1f start=%d end=%d\n", rect.rect.origin.y, rect.rect.size.height,
+                        rect.containsStart, rect.containsEnd];
+                }
+            }
+            return YES;
+        }];
+    NSURL* documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    [report writeToURL:[documents URLByAppendingPathComponent:@"hittest.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
 
 - (void)loadOlderIfNeeded {
