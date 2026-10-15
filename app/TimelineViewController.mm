@@ -11,7 +11,7 @@ NSString* ToNs(const std::string& s) {
 
 } // namespace
 
-@interface TimelineViewController () <UITableViewDataSource, UITextFieldDelegate>
+@interface TimelineViewController () <UITableViewDataSource, UITableViewDelegate, UITextFieldDelegate>
 @end
 
 @implementation TimelineViewController {
@@ -20,6 +20,8 @@ NSString* ToNs(const std::string& s) {
     std::vector<NHoshi::TMessage> _messages;
     UITableView* _table;
     UITextField* _input;
+    BOOL _hasOlder;
+    BOOL _loadingOlder;
 }
 
 - (instancetype)initWithSession:(HSSession*)session roomId:(const std::string&)roomId {
@@ -36,6 +38,7 @@ NSString* ToNs(const std::string& s) {
 
     _table = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
     _table.dataSource = self;
+    _table.delegate = self;
     _table.separatorStyle = UITableViewCellSeparatorStyleNone;
     _table.rowHeight = UITableViewAutomaticDimension;
     _table.estimatedRowHeight = 80;
@@ -73,20 +76,81 @@ NSString* ToNs(const std::string& s) {
     [NSNotificationCenter.defaultCenter removeObserver:self];
 }
 
+- (BOOL)isNearBottom {
+    const CGFloat visibleBottom = _table.contentOffset.y + _table.bounds.size.height - _table.adjustedContentInset.bottom;
+    return _table.contentSize.height - visibleBottom < 80;
+}
+
+- (void)scrollToBottomAnimated:(BOOL)animated {
+    if (!_messages.empty()) {
+        [_table scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:static_cast<NSInteger>(_messages.size()) - 1 inSection:0]
+                      atScrollPosition:UITableViewScrollPositionBottom animated:animated];
+    }
+}
+
 - (void)stateChanged {
     const auto& rooms = _session.state.Rooms;
     const auto it = rooms.find(_roomId);
     if (it == rooms.end()) {
         return;
     }
-    self.title = it->second.Name.empty() ? ToNs(_roomId) : ToNs(it->second.Name);
-    const bool grew = it->second.Timeline.size() > _messages.size();
-    _messages = it->second.Timeline;
-    [_table reloadData];
-    if (grew && !_messages.empty()) {
-        [_table scrollToRowAtIndexPath:[NSIndexPath indexPathForRow:static_cast<NSInteger>(_messages.size()) - 1 inSection:0]
-                      atScrollPosition:UITableViewScrollPositionBottom animated:YES];
+    const NHoshi::TRoom& room = it->second;
+    self.title = room.Name.empty() ? ToNs(_roomId) : ToNs(room.Name);
+    _hasOlder = !room.HistoryComplete;
+
+    const bool first = _messages.empty();
+    const bool atBottom = [self isNearBottom];
+    // Older messages went in front if the message we showed first is now further down
+    size_t prepended = 0;
+    if (!first) {
+        for (size_t i = 0; i < room.Timeline.size(); ++i) {
+            if (room.Timeline[i].EventId == _messages.front().EventId) {
+                prepended = i;
+                break;
+            }
+        }
     }
+    const CGFloat heightBefore = _table.contentSize.height;
+    const CGFloat offsetBefore = _table.contentOffset.y;
+    _messages = room.Timeline;
+    [_table reloadData];
+
+    if (first) {
+        [_table layoutIfNeeded];
+        [self scrollToBottomAnimated:NO];
+    } else if (prepended > 0) {
+        // Keep the message the user is reading at the same place on the screen
+        [_table layoutIfNeeded];
+        _table.contentOffset = CGPointMake(0, offsetBefore + _table.contentSize.height - heightBefore);
+    } else if (atBottom) {
+        // New messages scroll into view only for someone already at the bottom, not for someone reading history
+        [self scrollToBottomAnimated:YES];
+    }
+    [self loadOlderIfNeeded];
+}
+
+- (void)loadOlderIfNeeded {
+    if (_loadingOlder || !_hasOlder) {
+        return;
+    }
+    // Near the top, or the loaded messages do not even fill the screen
+    const BOOL nearTop = _table.contentOffset.y + _table.adjustedContentInset.top < 300;
+    if (!nearTop) {
+        return;
+    }
+    _loadingOlder = YES;
+    __weak TimelineViewController* weakSelf = self;
+    [_session loadOlderInRoom:_roomId completion:^(BOOL more) {
+        TimelineViewController* strongSelf = weakSelf;
+        if (strongSelf) {
+            strongSelf->_loadingOlder = NO;
+            strongSelf->_hasOlder = more;
+        }
+    }];
+}
+
+- (void)scrollViewDidScroll:(UIScrollView*)scrollView {
+    [self loadOlderIfNeeded];
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField*)textField {

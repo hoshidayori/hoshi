@@ -55,6 +55,13 @@ public:
 
     // One /sync round; long-polls up to timeoutMs when there is a previous batch
     void Sync(int timeoutMs);
+    // Fetches older messages of a room into State() via /messages; does nothing when the history is complete
+    void LoadOlder(const std::string& roomId, int limit);
+
+    // The requests without the state, for callers that keep the state themselves (the app shares it between
+    // a sync queue and a history queue). An empty since asks for the initial sync.
+    TJson FetchSync(const std::string& since, int timeoutMs);
+    TJson FetchMessages(const std::string& roomId, const std::string& from, int limit);
 
     // Creates an unencrypted room that anyone on the server can join; returns its id
     std::string CreatePublicRoom(const std::string& name);

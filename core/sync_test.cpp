@@ -93,6 +93,23 @@ int main() {
     Expect(after.Timeline.at(1).Body == "и тебе привет", "second message");
     Expect(after.Name == "Звёзды", "rename in timeline");
 
+    // History before the limited timeline: dir=b gives the newest first, state events must not win
+    state.PrependHistory("!726s6s6q:example.com", TJson::Parse(R"({"start": "t34-23535_0_0", "end": "t20-1_0_0", "chunk": [
+        {"type": "m.room.message", "sender": "@bob:example.com", "event_id": "$old2", "content": {"msgtype": "m.text", "body": "второе старое"}},
+        {"type": "m.room.name", "state_key": "", "sender": "@bob:example.com", "event_id": "$oldname", "content": {"name": "Старое имя"}},
+        {"type": "m.room.message", "sender": "@bob:example.com", "event_id": "$old1", "content": {"msgtype": "m.text", "body": "первое старое"}},
+        {"type": "m.room.message", "sender": "@alice:example.com", "event_id": "$143273582443PhrSn", "content": {"msgtype": "m.text", "body": "Привет, мир"}}
+    ]})"));
+    const TRoom& withHistory = state.Rooms.at("!726s6s6q:example.com");
+    Expect(withHistory.Timeline.size() == 4, "two older messages prepended, the known one skipped");
+    Expect(withHistory.Timeline.at(0).Body == "первое старое" && withHistory.Timeline.at(1).Body == "второе старое", "history in chronological order");
+    Expect(withHistory.Timeline.at(2).Body == "Привет, мир", "existing timeline follows history");
+    Expect(withHistory.Name == "Звёзды", "old name in history does not replace the current one");
+    Expect(withHistory.PrevBatch == "t20-1_0_0" && !withHistory.HistoryComplete, "next history token");
+
+    state.PrependHistory("!726s6s6q:example.com", TJson::Parse(R"({"start": "t20-1_0_0", "chunk": []})"));
+    Expect(state.Rooms.at("!726s6s6q:example.com").HistoryComplete, "empty chunk without end completes the history");
+
     state.Apply(TJson::Parse(R"({"next_batch": "s3", "rooms": {"leave": {"!secret:example.com": {"timeline": {"events": []}}}}})"));
     Expect(state.Rooms.count("!secret:example.com") == 0, "left room is dropped");
     Expect(state.Rooms.count("!726s6s6q:example.com") == 1, "other rooms stay");

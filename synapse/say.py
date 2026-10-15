@@ -36,20 +36,25 @@ def call(method, path, body=None, token=None):
     return data
 
 
-user, password, room_name, text = sys.argv[1:5]
-token = call('POST', '/_matrix/client/v3/login', {
-    'type': 'm.login.password', 'identifier': {'type': 'm.id.user', 'user': user}, 'password': password,
-})['access_token']
-for room in call('GET', '/_matrix/client/v3/joined_rooms', token=token)['joined_rooms']:
-    quoted = urllib.parse.quote(room, safe='')
-    conn = UnixConnection()
-    conn.request('GET', f'/_matrix/client/v3/rooms/{quoted}/state/m.room.name/',
-                 headers={'Authorization': 'Bearer ' + token, 'X-Forwarded-For': '127.0.0.1'})
-    response = conn.getresponse()
-    name = json.loads(response.read() or b'{}').get('name') if response.status == 200 else None
-    if name == room_name:
-        txn = uuid.uuid4().hex
-        sent = call('PUT', f'/_matrix/client/v3/rooms/{quoted}/send/m.room.message/{txn}',
-                    {'msgtype': 'm.text', 'body': text}, token)
-        print('sent', room, sent['event_id'])
-call('POST', '/_matrix/client/v3/logout', {}, token)
+def main():
+    user, password, room_name, text = sys.argv[1:5]
+    token = call('POST', '/_matrix/client/v3/login', {
+        'type': 'm.login.password', 'identifier': {'type': 'm.id.user', 'user': user}, 'password': password,
+    })['access_token']
+    for room in call('GET', '/_matrix/client/v3/joined_rooms', token=token)['joined_rooms']:
+        quoted = urllib.parse.quote(room, safe='')
+        conn = UnixConnection()
+        conn.request('GET', f'/_matrix/client/v3/rooms/{quoted}/state/m.room.name/',
+                     headers={'Authorization': 'Bearer ' + token, 'X-Forwarded-For': '127.0.0.1'})
+        response = conn.getresponse()
+        name = json.loads(response.read() or b'{}').get('name') if response.status == 200 else None
+        if name == room_name:
+            txn = uuid.uuid4().hex
+            sent = call('PUT', f'/_matrix/client/v3/rooms/{quoted}/send/m.room.message/{txn}',
+                        {'msgtype': 'm.text', 'body': text}, token)
+            print('sent', room, sent['event_id'])
+    call('POST', '/_matrix/client/v3/logout', {}, token)
+
+
+if __name__ == '__main__':
+    main()

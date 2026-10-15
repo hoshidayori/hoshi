@@ -74,6 +74,11 @@ int main() {
     Expect(send.Url == "https://example.com/_matrix/client/v3/rooms/%21r%3Aexample.com/send/m.room.message/txn1", "send url");
     Expect(TJson::Parse(send.Body).StringOr("body") == "привет", "send body");
 
+    http->Responses.push_back({200, R"({"chunk": [], "start": "p1"})"});
+    client.FetchMessages("!r:example.com", "p1", 50);
+    Expect(http->Requests.back().Url == "https://example.com/_matrix/client/v3/rooms/%21r%3Aexample.com/messages?dir=b&from=p1&limit=50",
+        "messages url");
+
     http->Responses.push_back({401, R"({"errcode": "M_UNKNOWN_TOKEN", "error": "Invalid access token passed."})"});
     try {
         client.Sync(30000);

@@ -6,6 +6,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 using namespace NHoshi;
 
@@ -61,6 +63,37 @@ int main() {
             }
         }
         Expect(seen, "bob received the message");
+
+        // History: more messages than an initial sync returns, read by a fresh client of bob's
+        const int count = 25;
+        for (int i = 0; i < count; ++i) {
+            alice.SendText(roomId, "история " + std::to_string(i), Unique("txn"));
+        }
+        // A separate login: Synapse caches the initial /sync response per user and device for a while, so
+        // reusing bob's token would return the snapshot from before these messages
+        TClient late(http, "http://localhost");
+        late.Login("bob", "bob-test-pw", "hoshi e2e history");
+        late.Sync(0);
+        const TRoom& before = late.State().Rooms.at(roomId);
+        Expect(before.Limited, "initial sync timeline is limited");
+        for (int i = 0; i < 20 && !late.State().Rooms.at(roomId).HistoryComplete; ++i) {
+            late.LoadOlder(roomId, 10);
+        }
+        const TRoom& after = late.State().Rooms.at(roomId);
+        Expect(after.HistoryComplete, "history reaches the start of the room");
+        std::vector<std::string> history;
+        for (const auto& message : after.Timeline) {
+            if (message.Body.rfind("история ", 0) == 0) {
+                history.push_back(message.Body);
+            }
+        }
+        bool inOrder = static_cast<int>(history.size()) == count;
+        for (int i = 0; inOrder && i < count; ++i) {
+            inOrder = history[static_cast<size_t>(i)] == "история " + std::to_string(i);
+        }
+        Expect(inOrder, "all history messages once and in order");
+        Expect(!after.Timeline.empty() && after.Timeline.front().Body == text, "the first message of the room comes first");
+        late.Logout();
 
         // Leave, so that test rooms do not pile up in the users' room lists
         bob.LeaveRoom(roomId);

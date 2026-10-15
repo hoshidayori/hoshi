@@ -33,6 +33,9 @@ extern NSNotificationName const HSSessionDidLoseAuthorization;
 // The latest state; read it on the main queue only
 - (const NHoshi::TSyncState&)state;
 
+// Loads the page of messages before the room's timeline; completion says whether more history remains
+- (void)loadOlderInRoom:(const std::string&)roomId completion:(void (^)(BOOL more))completion;
+
 - (void)sendText:(NSString*)text toRoom:(const std::string&)roomId completion:(void (^)(NSString* error))completion;
 
 @property (nonatomic, readonly) NSString* userId;

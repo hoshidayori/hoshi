@@ -1,5 +1,8 @@
 #include "sync.h"
 
+#include <optional>
+#include <unordered_set>
+
 namespace NHoshi {
 
 namespace {
@@ -14,17 +17,14 @@ void ApplyStateEvent(TRoom& room, const TJson& event) {
     }
 }
 
-void ApplyTimelineEvent(TRoom& room, const TJson& event) {
-    if (event["state_key"].IsString()) {
-        ApplyStateEvent(room, event);
-        return;
-    }
-    if (event.StringOr("type") != "m.room.message") {
-        return;
+// The message the client shows for an event, if the event is a message with a body
+std::optional<TMessage> ParseMessage(const TJson& event) {
+    if (event["state_key"].IsString() || event.StringOr("type") != "m.room.message") {
+        return std::nullopt;
     }
     const TJson& content = event["content"];
     if (!content["body"].IsString()) {
-        return;  // a redacted message has empty content
+        return std::nullopt;  // a redacted message has empty content
     }
     TMessage message;
     message.EventId = event.StringOr("event_id");
@@ -34,7 +34,17 @@ void ApplyTimelineEvent(TRoom& room, const TJson& event) {
     if (event["origin_server_ts"].IsInt()) {
         message.OriginServerTs = event["origin_server_ts"].AsInt();
     }
-    room.Timeline.push_back(std::move(message));
+    return message;
+}
+
+void ApplyTimelineEvent(TRoom& room, const TJson& event) {
+    if (event["state_key"].IsString()) {
+        ApplyStateEvent(room, event);
+        return;
+    }
+    if (auto message = ParseMessage(event)) {
+        room.Timeline.push_back(std::move(*message));
+    }
 }
 
 } // namespace
@@ -55,6 +65,7 @@ void TSyncState::Apply(const TJson& response) {
         return;
     }
     for (const auto& [roomId, data] : joined.AsObject()) {
+        const bool seenBefore = Rooms.count(roomId) != 0;
         TRoom& room = Rooms[roomId];
         room.Id = roomId;
         const TJson& state = data["state"]["events"];
@@ -64,11 +75,19 @@ void TSyncState::Apply(const TJson& response) {
             }
         }
         const TJson& timeline = data["timeline"];
-        if (timeline["limited"].IsBool() && timeline["limited"].AsBool()) {
+        const bool limited = timeline["limited"].IsBool() && timeline["limited"].AsBool();
+        if (limited) {
             // The gap is not filled yet, so messages before it are dropped rather than shown as if adjacent
             room.Timeline.clear();
             room.Limited = true;
+            room.HistoryComplete = false;
+        }
+        if (limited || !seenBefore) {
+            // History before the first timeline chunk we hold starts at its prev_batch
             room.PrevBatch = timeline.StringOr("prev_batch");
+            if (room.PrevBatch.empty()) {
+                room.HistoryComplete = true;
+            }
         }
         const TJson& events = timeline["events"];
         if (events.IsArray()) {
@@ -76,6 +95,37 @@ void TSyncState::Apply(const TJson& response) {
                 ApplyTimelineEvent(room, event);
             }
         }
+    }
+}
+
+void TSyncState::PrependHistory(const std::string& roomId, const TJson& response) {
+    const auto it = Rooms.find(roomId);
+    if (it == Rooms.end()) {
+        return;  // left while the request was in flight
+    }
+    TRoom& room = it->second;
+
+    std::unordered_set<std::string> known;
+    for (const auto& message : room.Timeline) {
+        known.insert(message.EventId);
+    }
+    // dir=b returns the newest event first; state events in history are old and must not replace current state
+    std::vector<TMessage> older;
+    const TJson& chunk = response["chunk"];
+    if (chunk.IsArray()) {
+        for (const auto& event : chunk.AsArray()) {
+            if (auto message = ParseMessage(event); message && !known.count(message->EventId)) {
+                older.push_back(std::move(*message));
+            }
+        }
+    }
+    room.Timeline.insert(room.Timeline.begin(), older.rbegin(), older.rend());
+
+    const bool emptyChunk = !chunk.IsArray() || chunk.AsArray().empty();
+    room.PrevBatch = response.StringOr("end");
+    if (room.PrevBatch.empty() || emptyChunk) {
+        room.PrevBatch.clear();
+        room.HistoryComplete = true;
     }
 }
 

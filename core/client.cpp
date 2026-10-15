@@ -85,12 +85,29 @@ void TClient::Logout() {
     AccessToken_.clear();
 }
 
-void TClient::Sync(int timeoutMs) {
+TJson TClient::FetchSync(const std::string& since, int timeoutMs) {
     std::string path = "/_matrix/client/v3/sync";
-    if (!State_.NextBatch.empty()) {
-        path += "?since=" + UrlEncode(State_.NextBatch) + "&timeout=" + std::to_string(timeoutMs);
+    if (!since.empty()) {
+        path += "?since=" + UrlEncode(since) + "&timeout=" + std::to_string(timeoutMs);
     }
-    State_.Apply(Call("GET", path, nullptr));
+    return Call("GET", path, nullptr);
+}
+
+void TClient::Sync(int timeoutMs) {
+    State_.Apply(FetchSync(State_.NextBatch, timeoutMs));
+}
+
+TJson TClient::FetchMessages(const std::string& roomId, const std::string& from, int limit) {
+    return Call("GET", "/_matrix/client/v3/rooms/" + UrlEncode(roomId) + "/messages?dir=b&from=" + UrlEncode(from) +
+        "&limit=" + std::to_string(limit), nullptr);
+}
+
+void TClient::LoadOlder(const std::string& roomId, int limit) {
+    const auto it = State_.Rooms.find(roomId);
+    if (it == State_.Rooms.end() || it->second.HistoryComplete || it->second.PrevBatch.empty()) {
+        return;
+    }
+    State_.PrependHistory(roomId, FetchMessages(roomId, it->second.PrevBatch, limit));
 }
 
 std::string TClient::CreatePublicRoom(const std::string& name) {

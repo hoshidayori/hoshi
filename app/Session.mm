@@ -5,8 +5,8 @@
 #include "client.h"
 
 #include <atomic>
-#include <functional>
 #include <memory>
+#include <mutex>
 
 namespace {
 
@@ -21,6 +21,17 @@ NSString* Describe(const NHoshi::TMatrixError& e) {
     return e.ErrCode.empty() ? ToNs(e.what()) : [NSString stringWithFormat:@"%@: %@", ToNs(e.ErrCode), ToNs(e.what())];
 }
 
+// One client per queue: TClient is not thread-safe, and each queue must not wait behind another's request
+struct TWorker {
+    dispatch_queue_t Queue;
+    std::unique_ptr<NHoshi::TClient> Client;
+
+    TWorker(const char* name, std::shared_ptr<NHoshi::IHttp> http, const std::string& homeserver)
+        : Queue(dispatch_queue_create(name, DISPATCH_QUEUE_SERIAL))
+        , Client(std::make_unique<NHoshi::TClient>(std::move(http), homeserver))
+    {}
+};
+
 } // namespace
 
 NSNotificationName const HSSessionStateDidChange = @"HSSessionStateDidChange";
@@ -28,28 +39,40 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
 
 @implementation HSSession {
     NSString* _homeserver;
-    // Sync long-polls for up to 30 s, so sending has its own client and queue and never waits behind it
-    dispatch_queue_t _queue;
-    std::unique_ptr<NHoshi::TClient> _client;
-    dispatch_queue_t _sendQueue;
-    std::unique_ptr<NHoshi::TClient> _sendClient;
+    // Sync long-polls for up to 30 s; sending and loading history have their own clients and queues
+    std::unique_ptr<TWorker> _sync;
+    std::unique_ptr<TWorker> _send;
+    std::unique_ptr<TWorker> _history;
     std::shared_ptr<std::atomic<bool>> _syncing;
-    NHoshi::TSyncState _state;  // main queue only
-    std::string _deviceId;     // main queue only
-    std::string _accessToken;  // main queue only
+
+    // The rooms, written by the sync and history queues. Network calls happen outside the lock.
+    std::mutex _coreMutex;
+    NHoshi::TSyncState _core;
+
+    NHoshi::TSyncState _state;  // main-queue copy for the screens
+    std::string _deviceId;      // main queue only
+    std::string _accessToken;   // main queue only
 }
 
 - (instancetype)initWithHomeserver:(NSString*)homeserver {
     if ((self = [super init])) {
         _homeserver = [homeserver copy];
         auto http = std::make_shared<NHoshi::TUrlSessionHttp>();
-        _queue = dispatch_queue_create("hoshi.sync", DISPATCH_QUEUE_SERIAL);
-        _client = std::make_unique<NHoshi::TClient>(http, homeserver.UTF8String);
-        _sendQueue = dispatch_queue_create("hoshi.send", DISPATCH_QUEUE_SERIAL);
-        _sendClient = std::make_unique<NHoshi::TClient>(http, homeserver.UTF8String);
+        const std::string hs = homeserver.UTF8String;
+        _sync = std::make_unique<TWorker>("hoshi.sync", http, hs);
+        _send = std::make_unique<TWorker>("hoshi.send", http, hs);
+        _history = std::make_unique<TWorker>("hoshi.history", http, hs);
         _syncing = std::make_shared<std::atomic<bool>>(false);
     }
     return self;
+}
+
+- (void)restoreWorkersUser:(const std::string&)userId device:(const std::string&)device token:(const std::string&)token {
+    for (TWorker* worker : {_send.get(), _history.get()}) {
+        dispatch_sync(worker->Queue, ^{
+            worker->Client->Restore(userId, device, token);
+        });
+    }
 }
 
 - (instancetype)initWithCredentials:(HSCredentials*)credentials {
@@ -57,9 +80,8 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
         _userId = [credentials.userId copy];
         _deviceId = credentials.deviceId.UTF8String;
         _accessToken = credentials.accessToken.UTF8String;
-        // Nothing else uses the clients yet, so they can be set up here directly
-        _client->Restore(_userId.UTF8String, _deviceId, _accessToken);
-        _sendClient->Restore(_userId.UTF8String, _deviceId, _accessToken);
+        _sync->Client->Restore(_userId.UTF8String, _deviceId, _accessToken);
+        [self restoreWorkersUser:_userId.UTF8String device:_deviceId token:_accessToken];
     }
     return self;
 }
@@ -76,19 +98,17 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
 - (void)loginUser:(NSString*)user password:(NSString*)password completion:(void (^)(NSString*))completion {
     const std::string u = user.UTF8String;
     const std::string p = password.UTF8String;
-    dispatch_async(_queue, ^{
+    dispatch_async(_sync->Queue, ^{
         NSString* error = nil;
         try {
-            self->_client->Login(u, p, "Hoshi on iOS");
+            self->_sync->Client->Login(u, p, "Hoshi on iOS");
         } catch (const NHoshi::TMatrixError& e) {
             error = Describe(e);
         }
-        const std::string id = self->_client->UserId();
-        const std::string device = self->_client->DeviceId();
-        const std::string token = self->_client->AccessToken();
-        dispatch_sync(self->_sendQueue, ^{
-            self->_sendClient->Restore(id, device, token);
-        });
+        const std::string id = self->_sync->Client->UserId();
+        const std::string device = self->_sync->Client->DeviceId();
+        const std::string token = self->_sync->Client->AccessToken();
+        [self restoreWorkersUser:id device:device token:token];
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_userId = ToNs(id);
             self->_deviceId = device;
@@ -101,9 +121,9 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
 - (void)logoutWithCompletion:(void (^)(void))completion {
     [self stopSyncing];
     // The send queue is idle between messages, unlike the sync queue that may wait in a long poll
-    dispatch_async(_sendQueue, ^{
+    dispatch_async(_send->Queue, ^{
         try {
-            self->_sendClient->Logout();
+            self->_send->Client->Logout();
         } catch (const NHoshi::TMatrixError&) {
             // Offline: the token stays valid on the server, but it is forgotten on this device
         }
@@ -115,32 +135,43 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
     return _state;
 }
 
+// Copies the shared state to the main queue and tells the screens
+- (void)publish:(std::shared_ptr<NHoshi::TSyncState>)snapshot {
+    __weak HSSession* weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        HSSession* strongSelf = weakSelf;
+        if (strongSelf) {
+            strongSelf->_state = *snapshot;
+            [NSNotificationCenter.defaultCenter postNotificationName:HSSessionStateDidChange object:strongSelf];
+        }
+    });
+}
+
 - (void)startSyncing {
     if (_syncing->exchange(true)) {
         return;
     }
-    __weak HSSession* weakSelf = self;
-    [self syncOnce:[weakSelf](const NHoshi::TSyncState& state) {
-        HSSession* strongSelf = weakSelf;
-        if (strongSelf) {
-            strongSelf->_state = state;
-            [NSNotificationCenter.defaultCenter postNotificationName:HSSessionStateDidChange object:strongSelf];
-        }
-    } syncing:_syncing];
+    [self syncOnce:_syncing];
 }
 
 // One round, then schedules the next one
-- (void)syncOnce:(std::function<void(const NHoshi::TSyncState&)>)onState syncing:(std::shared_ptr<std::atomic<bool>>)syncing {
+- (void)syncOnce:(std::shared_ptr<std::atomic<bool>>)syncing {
     __weak HSSession* weakSelf = self;
-    dispatch_async(_queue, ^{
+    dispatch_async(_sync->Queue, ^{
         HSSession* strongSelf = weakSelf;
         if (!strongSelf || !*syncing) {
             return;
         }
+        std::string since;
+        {
+            std::lock_guard lock(strongSelf->_coreMutex);
+            since = strongSelf->_core.NextBatch;
+        }
         bool ok = true;
         bool unauthorized = false;
+        NHoshi::TJson response;
         try {
-            strongSelf->_client->Sync(30000);
+            response = strongSelf->_sync->Client->FetchSync(since, 30000);
         } catch (const NHoshi::TMatrixError& e) {
             ok = false;
             unauthorized = e.ErrCode == "M_UNKNOWN_TOKEN";
@@ -152,14 +183,19 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
             });
             return;
         }
-        auto snapshot = std::make_shared<NHoshi::TSyncState>(strongSelf->_client->State());
-        dispatch_async(dispatch_get_main_queue(), ^{
-            onState(*snapshot);
-        });
+        if (ok) {
+            std::shared_ptr<NHoshi::TSyncState> snapshot;
+            {
+                std::lock_guard lock(strongSelf->_coreMutex);
+                strongSelf->_core.Apply(response);
+                snapshot = std::make_shared<NHoshi::TSyncState>(strongSelf->_core);
+            }
+            [strongSelf publish:snapshot];
+        }
         // After an error, wait a little instead of hammering the server
         const int64_t delay = ok ? 0 : 3 * NSEC_PER_SEC;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay), dispatch_get_main_queue(), ^{
-            [weakSelf syncOnce:onState syncing:syncing];
+            [weakSelf syncOnce:syncing];
         });
     });
 }
@@ -168,14 +204,53 @@ NSNotificationName const HSSessionDidLoseAuthorization = @"HSSessionDidLoseAutho
     *_syncing = false;
 }
 
+- (void)loadOlderInRoom:(const std::string&)roomId completion:(void (^)(BOOL more))completion {
+    const std::string room = roomId;
+    dispatch_async(_history->Queue, ^{
+        std::string from;
+        bool complete = true;
+        {
+            std::lock_guard lock(self->_coreMutex);
+            const auto it = self->_core.Rooms.find(room);
+            if (it != self->_core.Rooms.end()) {
+                from = it->second.PrevBatch;
+                complete = it->second.HistoryComplete || from.empty();
+            }
+        }
+        BOOL more = NO;
+        if (!complete) {
+            try {
+                const NHoshi::TJson response = self->_history->Client->FetchMessages(room, from, 50);
+                std::shared_ptr<NHoshi::TSyncState> snapshot;
+                {
+                    std::lock_guard lock(self->_coreMutex);
+                    // A limited sync may have reset the room meanwhile; then this page no longer fits
+                    const auto it = self->_core.Rooms.find(room);
+                    if (it != self->_core.Rooms.end() && it->second.PrevBatch == from) {
+                        self->_core.PrependHistory(room, response);
+                        more = !it->second.HistoryComplete;
+                    }
+                    snapshot = std::make_shared<NHoshi::TSyncState>(self->_core);
+                }
+                [self publish:snapshot];
+            } catch (const NHoshi::TMatrixError&) {
+                more = YES;  // try again on the next scroll
+            }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(more);
+        });
+    });
+}
+
 - (void)sendText:(NSString*)text toRoom:(const std::string&)roomId completion:(void (^)(NSString*))completion {
     const std::string body = text.UTF8String;
     const std::string room = roomId;
     const std::string txnId = NSUUID.UUID.UUIDString.UTF8String;
-    dispatch_async(_sendQueue, ^{
+    dispatch_async(_send->Queue, ^{
         NSString* error = nil;
         try {
-            self->_sendClient->SendText(room, body, txnId);
+            self->_send->Client->SendText(room, body, txnId);
         } catch (const NHoshi::TMatrixError& e) {
             error = Describe(e);
         }
