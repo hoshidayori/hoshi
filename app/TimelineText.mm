@@ -5,10 +5,9 @@ NSAttributedStringKey const HSSenderMetaAttribute = @"HSSenderMeta";
 
 const CGFloat HSBubbleSide = 12;
 const CGFloat HSAvatarSize = 30;
-const CGFloat HSAvatarColumn = HSAvatarSize + 8;
+const CGFloat HSAvatarColumn = 54;  // fits "12:48 PM" in the caption font
 const CGFloat HSBubblePadX = 10;
 const CGFloat HSBubblePadY = 7;
-const CGFloat HSTimeColumn = 58;
 
 @implementation HSMessageMeta
 
@@ -108,7 +107,9 @@ UIFont* TimeFont() {
     if (CGRectIsNull(bubble)) {
         return bounds;
     }
-    bubble.size.width += HSTimeColumn;
+    // The time column left of the bubble
+    bubble.origin.x -= HSAvatarColumn;
+    bubble.size.width += HSAvatarColumn;
     return CGRectUnion(bounds, bubble);
 }
 
@@ -140,11 +141,11 @@ UIFont* TimeFont() {
         [[[UIColor.labelColor resolvedColorWithTraitCollection:traits] colorWithAlphaComponent:0.06] setFill];
         [[UIBezierPath bezierPathWithRoundedRect:bubble cornerRadius:12] fill];
 
-        // Time, and before it the state of a message sent from this device, at the bubble's bottom right
+        // In the column left of the bubble, against it, on its last line: the time, or instead the state of a
+        // message sent from this device or still waiting for its key
         UIFont* font = TimeFont();
-        const CGFloat x = CGRectGetMaxX(bubble) + 6;
+        const CGFloat right = CGRectGetMinX(bubble) - 5;
         const CGFloat baselineY = CGRectGetMaxY(bubble) - HSBubblePadY;
-        CGFloat timeX = x;
         NSString* icon = meta.status == HSMessageStatusSending ? @"clock"
             : meta.status == HSMessageStatusFailed ? @"exclamationmark.circle.fill"
             : meta.waitingForKey ? @"lock" : nil;
@@ -152,13 +153,15 @@ UIFont* TimeFont() {
             UIColor* color = meta.status == HSMessageStatusFailed ? UIColor.systemRedColor : UIColor.secondaryLabelColor;
             UIImage* image = [[UIImage systemImageNamed:icon withConfiguration:[UIImageSymbolConfiguration configurationWithFont:font]]
                 imageWithTintColor:[color resolvedColorWithTraitCollection:traits] renderingMode:UIImageRenderingModeAlwaysOriginal];
-            [image drawAtPoint:CGPointMake(x, baselineY - image.size.height + 2)];
-            timeX += image.size.width + 3;
+            [image drawAtPoint:CGPointMake(right - image.size.width, baselineY - image.size.height + 2)];
+        } else {
+            NSDictionary* attributes = @{
+                NSFontAttributeName: font,
+                NSForegroundColorAttributeName: [UIColor.secondaryLabelColor resolvedColorWithTraitCollection:traits],
+            };
+            const CGFloat width = [meta.time sizeWithAttributes:attributes].width;
+            [meta.time drawAtPoint:CGPointMake(right - width, baselineY - font.ascender) withAttributes:attributes];
         }
-        [meta.time drawAtPoint:CGPointMake(timeX, baselineY - font.ascender) withAttributes:@{
-            NSFontAttributeName: font,
-            NSForegroundColorAttributeName: [UIColor.secondaryLabelColor resolvedColorWithTraitCollection:traits],
-        }];
         UIGraphicsPopContext();
     }
     [super drawAtPoint:point inContext:context];
@@ -263,9 +266,9 @@ UIFont* TimeFont() {
     if (!meta || meta.status != HSMessageStatusFailed || CGRectIsNull(bubble)) {
         return nil;
     }
-    // The tap counts on the icon and time, right of the bubble, so a tap in the text still selects
+    // The tap counts on the icon, left of the bubble, so a tap in the text still selects
     const CGFloat x = inContainer.x - fragment.layoutFragmentFrame.origin.x;
-    return x > CGRectGetMaxX(bubble) ? meta.txnId : nil;
+    return x < CGRectGetMinX(bubble) ? meta.txnId : nil;
 }
 
 @end

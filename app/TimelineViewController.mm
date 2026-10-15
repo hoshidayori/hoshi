@@ -237,7 +237,8 @@ static const CGFloat MaxInputLines = 6;
 
 #pragma mark - Building the text
 
-- (NSAttributedString*)itemForMessage:(const NHoshi::TMessage&)message showSender:(BOOL)showSender room:(const NHoshi::TRoom&)room {
+- (NSAttributedString*)itemForMessage:(const NHoshi::TMessage&)message showSender:(BOOL)showSender
+                                 showTime:(BOOL)showTime room:(const NHoshi::TRoom&)room {
     NSMutableAttributedString* item = [[NSMutableAttributedString alloc] init];
     const CGFloat indent = HSBubbleSide + HSAvatarColumn + HSBubblePadX;
 
@@ -269,11 +270,11 @@ static const CGFloat MaxInputLines = 6;
     NSMutableParagraphStyle* style = [[NSMutableParagraphStyle alloc] init];
     style.firstLineHeadIndent = indent;
     style.headIndent = indent;
-    style.tailIndent = -(HSBubbleSide + HSBubblePadX + HSTimeColumn);
+    style.tailIndent = -(HSBubbleSide + HSBubblePadX);
     style.paragraphSpacingBefore = showSender ? 0 : 2 * HSBubblePadY + 4;
 
     HSMessageMeta* meta = [[HSMessageMeta alloc] init];
-    meta.time = message.OriginServerTs ? TimeOf(message.OriginServerTs) : @"";
+    meta.time = showTime && message.OriginServerTs ? TimeOf(message.OriginServerTs) : @"";
     meta.txnId = ToNs(message.TxnId);
     meta.waitingForKey = message.IsWaitingForKey();
     meta.status = message.SendState == NHoshi::TMessage::ESendState::Sending ? HSMessageStatusSending
@@ -453,8 +454,10 @@ static const CGFloat MaxInputLines = 6;
     NSMutableArray<NSAttributedString*>* items = [NSMutableArray arrayWithCapacity:messages.size()];
     for (size_t i = 0; i < messages.size(); ++i) {
         const bool showSender = i == 0 || messages[i - 1].Sender != messages[i].Sender;
+        // The time only where it changes, or a new series starts; a column of the same minute says nothing
+        const bool showTime = showSender || ![TimeOf(messages[i - 1].OriginServerTs) isEqualToString:TimeOf(messages[i].OriginServerTs)];
         keys.push_back(KeyOf(messages[i]));
-        [items addObject:[self itemForMessage:messages[i] showSender:showSender room:room]];
+        [items addObject:[self itemForMessage:messages[i] showSender:showSender showTime:showTime room:room]];
     }
 
     const bool first = _keys.empty();
@@ -693,6 +696,9 @@ static const CGFloat MaxInputLines = 6;
     const CGFloat y = MIN(top + 6, seriesBottom - HSAvatarSize);
     _sticky.text = sender.initial;
     _sticky.backgroundColor = sender.color;
+    // A ring of the background color, so it lies cleanly over the times it passes
+    _sticky.layer.borderWidth = 2;
+    _sticky.layer.borderColor = [UIColor.systemBackgroundColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
     _sticky.frame = CGRectMake(HSBubbleSide, y, HSAvatarSize, HSAvatarSize);
     _sticky.hidden = NO;
     [_text bringSubviewToFront:_sticky];

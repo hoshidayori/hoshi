@@ -34,12 +34,13 @@ extern NSAttributedStringKey const HSMessageMetaAttribute;
 extern NSAttributedStringKey const HSSenderMetaAttribute;
 
 // Geometry shared by the paragraph styles and the drawing
-extern const CGFloat HSBubbleSide;     // from the screen edge to the avatar
+extern const CGFloat HSBubbleSide;     // from the screen edges to the avatar and to the widest bubble
 extern const CGFloat HSAvatarSize;
-extern const CGFloat HSAvatarColumn;   // from the avatar's left edge to the bubble
+// From the avatar's left edge to the bubble. Below a series' avatar the column holds each message's time, or
+// its status icon, so the bubbles can use the whole width to the right.
+extern const CGFloat HSAvatarColumn;
 extern const CGFloat HSBubblePadX;     // from the bubble edge to the text
 extern const CGFloat HSBubblePadY;
-extern const CGFloat HSTimeColumn;     // room right of the widest bubble for the time and the status icon
 
 @interface HSTimelineTextView : UITextView
 - (instancetype)init;
