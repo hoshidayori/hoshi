@@ -66,9 +66,9 @@ enable_testing()
 
 # Cryptography on top of OpenSSL; for now only for the desktop tests, the iOS app needs its own OpenSSL build
 find_package(OpenSSL 3 REQUIRED)
-add_library(hoshi_crypto core/crypto.cpp core/megolm.cpp)
+add_library(hoshi_crypto core/crypto.cpp core/megolm.cpp core/olm.cpp)
 target_include_directories(hoshi_crypto PUBLIC core)
-target_link_libraries(hoshi_crypto PUBLIC OpenSSL::Crypto)
+target_link_libraries(hoshi_crypto PUBLIC OpenSSL::Crypto hoshi_core)
 target_compile_options(hoshi_crypto PRIVATE -Wall -Wextra -Werror)
 
 add_executable(crypto_test core/crypto_test.cpp)
@@ -81,6 +81,24 @@ target_link_libraries(megolm_test PRIVATE hoshi_crypto hoshi_core)
 target_compile_options(megolm_test PRIVATE -Wall -Wextra -Werror)
 target_compile_definitions(megolm_test PRIVATE HOSHI_TESTDATA="${CMAKE_SOURCE_DIR}/core/testdata")
 add_test(NAME megolm_test COMMAND megolm_test)
+
+add_executable(olm_test core/olm_test.cpp)
+target_link_libraries(olm_test PRIVATE hoshi_crypto)
+target_compile_options(olm_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME olm_test COMMAND olm_test)
+
+# Driven by interop/olm_interop.py
+add_executable(olm_tool core/olm_tool.cpp)
+target_link_libraries(olm_tool PRIVATE hoshi_crypto)
+target_compile_options(olm_tool PRIVATE -Wall -Wextra -Werror)
+
+# Compatibility with vodozemac, when its Python bindings are installed in interop/venv
+set(HOSHI_INTEROP_PYTHON ${CMAKE_SOURCE_DIR}/interop/venv/bin/python)
+if(EXISTS ${HOSHI_INTEROP_PYTHON})
+    add_test(NAME olm_interop COMMAND ${HOSHI_INTEROP_PYTHON} ${CMAKE_SOURCE_DIR}/interop/olm_interop.py $<TARGET_FILE:olm_tool>)
+    add_test(NAME megolm_interop COMMAND sh -c "$<TARGET_FILE:megolm_tool> megolm_hoshi.json && ${HOSHI_INTEROP_PYTHON} ${CMAKE_SOURCE_DIR}/interop/megolm_vectors.py check megolm_hoshi.json")
+    set_tests_properties(olm_interop megolm_interop PROPERTIES LABELS interop)
+endif()
 
 # Writes a session for interop/megolm_vectors.py check
 add_executable(megolm_tool core/megolm_tool.cpp)
