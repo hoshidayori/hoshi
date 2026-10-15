@@ -43,6 +43,13 @@ void TSyncState::Apply(const TJson& response) {
     if (response["next_batch"].IsString()) {
         NextBatch = response["next_batch"].AsString();
     }
+    // Rooms the user left or was removed from are dropped from the list
+    const TJson& left = response["rooms"]["leave"];
+    if (left.IsObject()) {
+        for (const auto& [roomId, data] : left.AsObject()) {
+            Rooms.erase(roomId);
+        }
+    }
     const TJson& joined = response["rooms"]["join"];
     if (!joined.IsObject()) {
         return;

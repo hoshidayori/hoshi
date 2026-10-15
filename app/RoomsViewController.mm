@@ -2,6 +2,8 @@
 #import "Session.h"
 #import "TimelineViewController.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -43,6 +45,15 @@ NSString* ToNs(const std::string& s) {
     for (const auto& [id, room] : _session.state.Rooms) {
         _roomIds.push_back(id);
     }
+    // The room with the newest message first, as in other messengers; rooms without messages go last
+    const auto& rooms = _session.state.Rooms;
+    auto lastActivity = [&rooms](const std::string& id) -> std::int64_t {
+        const auto& timeline = rooms.at(id).Timeline;
+        return timeline.empty() ? 0 : timeline.back().OriginServerTs;
+    };
+    std::stable_sort(_roomIds.begin(), _roomIds.end(), [&](const std::string& a, const std::string& b) {
+        return lastActivity(a) > lastActivity(b);
+    });
     [self.tableView reloadData];
 }
 

@@ -93,6 +93,10 @@ int main() {
     Expect(after.Timeline.at(1).Body == "и тебе привет", "second message");
     Expect(after.Name == "Звёзды", "rename in timeline");
 
+    state.Apply(TJson::Parse(R"({"next_batch": "s3", "rooms": {"leave": {"!secret:example.com": {"timeline": {"events": []}}}}})"));
+    Expect(state.Rooms.count("!secret:example.com") == 0, "left room is dropped");
+    Expect(state.Rooms.count("!726s6s6q:example.com") == 1, "other rooms stay");
+
     // Garbage of the wrong shape must not throw
     state.Apply(TJson::Parse(R"({"rooms": {"join": {"!x:y": {"timeline": {"events": [1, "a", null, {"type": 5}]}}}}})"));
     Expect(state.Rooms.at("!x:y").Timeline.empty(), "malformed events are ignored");

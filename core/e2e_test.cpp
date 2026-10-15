@@ -62,6 +62,10 @@ int main() {
         }
         Expect(seen, "bob received the message");
 
+        // Leave, so that test rooms do not pile up in the users' room lists
+        bob.LeaveRoom(roomId);
+        alice.LeaveRoom(roomId);
+
         try {
             TClient wrong(http, "http://localhost");
             wrong.Login("alice", "wrong-password", "hoshi e2e");

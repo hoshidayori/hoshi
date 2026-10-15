@@ -57,6 +57,7 @@ public:
     // Creates an unencrypted room that anyone on the server can join; returns its id
     std::string CreatePublicRoom(const std::string& name);
     void JoinRoom(const std::string& roomIdOrAlias);
+    void LeaveRoom(const std::string& roomId);
 
     // Sends an m.text message and returns the event id. The transaction id makes a retry idempotent.
     std::string SendText(const std::string& roomId, const std::string& text, const std::string& txnId);

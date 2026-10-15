@@ -93,6 +93,11 @@ void TClient::JoinRoom(const std::string& roomIdOrAlias) {
     Call("POST", "/_matrix/client/v3/join/" + UrlEncode(roomIdOrAlias), &body);
 }
 
+void TClient::LeaveRoom(const std::string& roomId) {
+    const TJson body(TJson::TObject{});
+    Call("POST", "/_matrix/client/v3/rooms/" + UrlEncode(roomId) + "/leave", &body);
+}
+
 std::string TClient::SendText(const std::string& roomId, const std::string& text, const std::string& txnId) {
     const TJson body(TJson::TObject{{"msgtype", "m.text"}, {"body", text}});
     const TJson response = Call("PUT",

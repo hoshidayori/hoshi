@@ -32,7 +32,8 @@ struct TSyncState {
     std::string NextBatch;
     std::map<std::string, TRoom> Rooms;
 
-    // Applies one /sync response: updates names and encryption from state, appends new timeline messages.
+    // Applies one /sync response: drops left rooms, updates names and encryption from state, appends new
+    // timeline messages.
     // Events that are not messages and messages without a body are skipped; their shape is not trusted.
     void Apply(const TJson& response);
 };
