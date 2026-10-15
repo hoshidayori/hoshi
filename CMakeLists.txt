@@ -64,6 +64,18 @@ endif()
 
 enable_testing()
 
+# Cryptography on top of OpenSSL; for now only for the desktop tests, the iOS app needs its own OpenSSL build
+find_package(OpenSSL 3 REQUIRED)
+add_library(hoshi_crypto core/crypto.cpp)
+target_include_directories(hoshi_crypto PUBLIC core)
+target_link_libraries(hoshi_crypto PUBLIC OpenSSL::Crypto)
+target_compile_options(hoshi_crypto PRIVATE -Wall -Wextra -Werror)
+
+add_executable(crypto_test core/crypto_test.cpp)
+target_link_libraries(crypto_test PRIVATE hoshi_crypto)
+target_compile_options(crypto_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME crypto_test COMMAND crypto_test)
+
 add_executable(json_test core/json_test.cpp)
 target_link_libraries(json_test PRIVATE hoshi_core)
 target_compile_options(json_test PRIVATE -Wall -Wextra -Werror)
