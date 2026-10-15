@@ -8,6 +8,7 @@ screenshots/
 # Local check that the Swift SDK package downloads; not part of the client
 probe/
 synapse/venv/
+interop/venv/
 synapse/data/
 # Local test server secrets: shared registration secret, macaroon and form secrets, signing key
 synapse/homeserver.yaml

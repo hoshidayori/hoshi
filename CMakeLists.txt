@@ -66,7 +66,7 @@ enable_testing()
 
 # Cryptography on top of OpenSSL; for now only for the desktop tests, the iOS app needs its own OpenSSL build
 find_package(OpenSSL 3 REQUIRED)
-add_library(hoshi_crypto core/crypto.cpp)
+add_library(hoshi_crypto core/crypto.cpp core/megolm.cpp)
 target_include_directories(hoshi_crypto PUBLIC core)
 target_link_libraries(hoshi_crypto PUBLIC OpenSSL::Crypto)
 target_compile_options(hoshi_crypto PRIVATE -Wall -Wextra -Werror)
@@ -75,6 +75,17 @@ add_executable(crypto_test core/crypto_test.cpp)
 target_link_libraries(crypto_test PRIVATE hoshi_crypto)
 target_compile_options(crypto_test PRIVATE -Wall -Wextra -Werror)
 add_test(NAME crypto_test COMMAND crypto_test)
+
+add_executable(megolm_test core/megolm_test.cpp)
+target_link_libraries(megolm_test PRIVATE hoshi_crypto hoshi_core)
+target_compile_options(megolm_test PRIVATE -Wall -Wextra -Werror)
+target_compile_definitions(megolm_test PRIVATE HOSHI_TESTDATA="${CMAKE_SOURCE_DIR}/core/testdata")
+add_test(NAME megolm_test COMMAND megolm_test)
+
+# Writes a session for interop/megolm_vectors.py check
+add_executable(megolm_tool core/megolm_tool.cpp)
+target_link_libraries(megolm_tool PRIVATE hoshi_crypto hoshi_core)
+target_compile_options(megolm_tool PRIVATE -Wall -Wextra -Werror)
 
 add_executable(json_test core/json_test.cpp)
 target_link_libraries(json_test PRIVATE hoshi_core)
