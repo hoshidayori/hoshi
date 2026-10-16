@@ -52,7 +52,7 @@ bool HasKey(const NHoshi::TMessage& message, const std::string& key) {
 // The window starts with this many of the newest messages, more than a screen of short ones, and grows or
 // shrinks by WindowStep messages as the screen comes near its edges
 constexpr size_t InitialWindow = 30;
-constexpr NSInteger WindowStep = 10;
+constexpr NSInteger WindowStep = 6;
 
 // Everything the text of a message depends on besides its key; strings as hashes, so that comparing the
 // states of thousands of messages allocates nothing
@@ -84,6 +84,7 @@ struct TItemState {
     std::vector<std::string> _keys;
     NSArray<NSAttributedString*>* _items;
     std::vector<NSUInteger> _itemOffsets;  // where each item starts in the text
+    std::vector<CGFloat> _itemTops;        // and on screen, in content coordinates, as of the last update
     std::vector<TItemState> _itemStates;  // what each of _items was built from
     // The window: _items are the room's messages from its first to its last key. _windowStart is the index of
     // the first one among all of the room's, _windowTotal their number.
@@ -722,16 +723,21 @@ static const CGFloat MaxInputLines = 6;
             _text.contentOffset = CGPointMake(0, fragment.layoutFragmentFrame.origin.y + _text.textContainerInset.top - anchorShift);
         }
     }
+    [self rememberItemTops];
     const CFAbsoluteTime scrolled = CFAbsoluteTimeGetCurrent();
     [self loadOlderIfNeeded];
+    const CFAbsoluteTime olderAsked = CFAbsoluteTimeGetCurrent();
     [self updateToBottomButton];
+    const CFAbsoluteTime buttoned = CFAbsoluteTimeGetCurrent();
     [self updateStickyAvatar];
-    if ([NSUserDefaults.standardUserDefaults boolForKey:@"HSStressHistory"]) {
+    const CFAbsoluteTime stickied = CFAbsoluteTimeGetCurrent();
+    static const BOOL stress = [NSUserDefaults.standardUserDefaults boolForKey:@"HSStressHistory"];
+    if (stress) {
         const double rest = (scrolled - applied) * 1000 - _textLayoutMs - _viewLayoutMs;
         _stressSplit = [NSString stringWithFormat:@"build %.1f, anchor %.1f, edit %.1f, TextKit layout %.1f, view layout %.1f, "
-            "offsets and scroll %.1f, sticky avatar %.1f",
+            "offsets and scroll %.1f, history request %.2f, bottom button %.2f, sticky avatar %.2f",
             (built - started) * 1000, (anchored - built) * 1000, (applied - anchored) * 1000, _textLayoutMs, _viewLayoutMs, rest,
-            (CFAbsoluteTimeGetCurrent() - scrolled) * 1000];
+            (olderAsked - scrolled) * 1000, (buttoned - olderAsked) * 1000, (stickied - buttoned) * 1000];
         [self stressHistoryAfterUpdateFrom:started anchor:first ? NSNotFound : moved(anchor)];
     }
     _windowTotal = total;
@@ -758,8 +764,9 @@ static const CGFloat MaxInputLines = 6;
     }
     // A selection the user is making may still be dragged anywhere in the window: nothing goes then
     if (_text.selectedRange.length == 0 && _items.count > 1) {
-        const CGFloat keepAbove = visibleTop - screen * 3 / 4;
-        const CGFloat keepBelow = visibleBottom + screen * 3 / 4;
+        // Somewhat more than the half screen kept, so a message at the edge does not go and come back at once
+        const CGFloat keepAbove = visibleTop - screen * 2 / 3;
+        const CGFloat keepBelow = visibleBottom + screen * 2 / 3;
         // One lookup per edge: the message at that height, and all beyond it go
         size_t trimTop = 0;
         if (keepAbove > 0) {
@@ -926,21 +933,44 @@ static const CGFloat MaxInputLines = 6;
 
 // The index in _items of the message at a height in content coordinates
 - (size_t)itemAtY:(CGFloat)y {
-    NSTextLayoutFragment* fragment = [_text.textLayoutManager textLayoutFragmentForPosition:
-        CGPointMake(HSBubbleSide * 2, MAX(y - _text.textContainerInset.top, 0))];
-    if (!fragment || _itemOffsets.empty()) {
+    if (_itemTops.empty()) {
         return 0;
     }
-    const NSUInteger offset = [self offsetOfLocation:fragment.rangeInElement.location];
-    const auto after = std::upper_bound(_itemOffsets.begin(), _itemOffsets.end(), offset);
-    return after == _itemOffsets.begin() ? 0 : static_cast<size_t>(after - _itemOffsets.begin()) - 1;
+    const auto after = std::upper_bound(_itemTops.begin(), _itemTops.end(), y);
+    return after == _itemTops.begin() ? 0 : static_cast<size_t>(after - _itemTops.begin()) - 1;
 }
 
 // Top of the item's first paragraph, in the text view's content coordinates
 - (CGFloat)topOfItem:(size_t)index {
-    id<NSTextLocation> location = [self locationOfOffset:_itemOffsets[index]];
-    NSTextLayoutFragment* fragment = location ? [_text.textLayoutManager textLayoutFragmentForLocation:location] : nil;
-    return fragment ? fragment.layoutFragmentFrame.origin.y + _text.textContainerInset.top : 0;
+    return index < _itemTops.size() ? _itemTops[index] : 0;
+}
+
+// After an update, where each item starts on screen. Scrolling then finds messages by height with a binary
+// search instead of asking TextKit, whose conversions between characters and places were the slow part of a
+// scroll step. One pass over the window's layout fragments, which keep their places until the next update.
+- (void)rememberItemTops {
+    _itemTops.assign(_itemOffsets.size(), 0);
+    if (_itemOffsets.empty()) {
+        return;
+    }
+    __block NSUInteger offset = 0;
+    __block size_t item = 0;
+    const CGFloat inset = _text.textContainerInset.top;
+    std::vector<CGFloat>& tops = _itemTops;
+    const std::vector<NSUInteger>& starts = _itemOffsets;
+    [_text.textLayoutManager enumerateTextLayoutFragmentsFromLocation:_text.textLayoutManager.documentRange.location
+        options:NSTextLayoutFragmentEnumerationOptionsNone usingBlock:^BOOL(NSTextLayoutFragment* fragment) {
+            while (item < starts.size() && starts[item] <= offset) {
+                if (starts[item] == offset) {
+                    tops[item] = fragment.layoutFragmentFrame.origin.y + inset;
+                }
+                ++item;
+            }
+            NSTextParagraph* paragraph = [fragment.textElement isKindOfClass:[NSTextParagraph class]]
+                ? (NSTextParagraph*)fragment.textElement : nil;
+            offset += paragraph.attributedString.length;
+            return item < starts.size();
+        }];
 }
 
 // When the start of a series is above the screen, its avatar waits at the top edge while the series' messages
@@ -975,7 +1005,8 @@ static const CGFloat MaxInputLines = 6;
     const CGFloat seriesBottom = next < _items.count ? [self topOfItem:next] + 10 : _text.contentSize.height;
     const CGFloat y = MIN(top + 6, seriesBottom - HSAvatarSize);
     // Only what changed: this runs on every scroll step, and each property set is work for the render server
-    if (_stickySender != sender) {
+    // By value: the window's lead series gets a new but equal avatar object with every update
+    if (![_stickySender isEqual:sender]) {
         _stickySender = sender;
         _sticky.text = sender.loading ? nil : sender.initial;
         _sticky.backgroundColor = sender.loading ? UIColor.tertiarySystemFillColor : sender.color;
