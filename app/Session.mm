@@ -101,6 +101,7 @@ std::int64_t NowMs() {
     // Avatars by mxc URI, main queue only: pictures in memory, and the ones being fetched or not available
     NSCache<NSString*, UIImage*>* _avatars;
     NSMutableSet<NSString*>* _avatarsAsked;
+    NSMutableSet<NSString*>* _avatarsMissing;  // asked, and neither the cache nor the server had a picture
 
     // The rooms, written by the sync and history queues. Network calls happen outside the lock.
     std::mutex _coreMutex;
@@ -133,6 +134,7 @@ std::int64_t NowMs() {
         _syncing = std::make_shared<std::atomic<bool>>(false);
         _avatars = [[NSCache alloc] init];
         _avatarsAsked = [NSMutableSet set];
+        _avatarsMissing = [NSMutableSet set];
     }
     return self;
 }
@@ -582,43 +584,58 @@ static NSURL* AvatarFile(const NHoshi::TMxc& mxc) {
     if (UIImage* image = [_avatars objectForKey:key]) {
         return image;
     }
-    NSURL* file = AvatarFile(*mxc);
-    if (UIImage* image = [UIImage imageWithContentsOfFile:file.path]) {
-        [_avatars setObject:image forKey:key];
-        return image;
-    }
     if ([_avatarsAsked containsObject:key]) {
-        return nil;  // on its way, or the server has none: the letter stays
+        return nil;  // on its way, or the server has none
     }
+    // Nothing here waits: the cache on disk is read on the media queue too, and the picture is decoded there,
+    // so that neither building the timeline nor drawing it stops for it
     [_avatarsAsked addObject:key];
     const std::string mxcUri = uri;
+    const NHoshi::TMxc parsed = *mxc;
     __weak HSSession* weakSelf = self;
     dispatch_async(_media->Queue, ^{
         HSSession* strongSelf = weakSelf;
         if (!strongSelf) {
             return;
         }
-        NSData* data = nil;
-        try {
-            // Twice the drawn size, for sharp circles on Retina screens
-            const std::string bytes = strongSelf->_media->Client->FetchThumbnail(mxcUri, 96);
-            data = [NSData dataWithBytes:bytes.data() length:bytes.size()];
-        } catch (const NHoshi::TMatrixError& e) {
-            NSLog(@"Hoshi: no avatar %s: %s", mxcUri.c_str(), e.what());
+        NSURL* file = AvatarFile(parsed);
+        NSData* data = [NSData dataWithContentsOfURL:file];
+        const bool cached = data != nil;
+        if (!data) {
+            try {
+                // Twice the drawn size, for sharp circles on Retina screens
+                const std::string bytes = strongSelf->_media->Client->FetchThumbnail(mxcUri, 96);
+                data = [NSData dataWithBytes:bytes.data() length:bytes.size()];
+            } catch (const NHoshi::TMatrixError& e) {
+                NSLog(@"Hoshi: no avatar %s: %s", mxcUri.c_str(), e.what());
+            }
         }
-        UIImage* image = data ? [UIImage imageWithData:data] : nil;
-        if (image) {
+        UIImage* image = [[UIImage imageWithData:data] imageByPreparingForDisplay];
+        if (image && !cached) {
             [data writeToURL:file atomically:YES];
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             HSSession* session = weakSelf;
-            if (session && image) {
-                [session->_avatars setObject:image forKey:key];
-                [NSNotificationCenter.defaultCenter postNotificationName:HSSessionAvatarsDidChange object:session];
+            if (!session) {
+                return;
             }
+            if (image) {
+                [session->_avatars setObject:image forKey:key];
+            } else {
+                [session->_avatarsMissing addObject:key];
+            }
+            [NSNotificationCenter.defaultCenter postNotificationName:HSSessionAvatarsDidChange object:session];
         });
     });
     return nil;
+}
+
+- (BOOL)avatarIsLoading:(const std::string&)uri {
+    if (!NHoshi::ParseMxc(uri)) {
+        return NO;
+    }
+    NSString* key = @(uri.c_str());
+    return ![_avatars objectForKey:key] && ![_avatarsMissing containsObject:key];
 }
 
 #pragma mark - Device verification

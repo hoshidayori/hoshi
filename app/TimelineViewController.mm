@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <functional>
+#include <string_view>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -38,6 +40,20 @@ std::string KeyOf(const NHoshi::TMessage& message) {
     return message.TxnId.empty() ? "e:" + message.EventId : "t:" + message.TxnId;
 }
 
+// Whether the message has the key KeyOf gives it, without building the key
+bool HasKey(const NHoshi::TMessage& message, const std::string& key) {
+    if (key.size() < 2) {
+        return false;
+    }
+    const std::string_view id = std::string_view(key).substr(2);
+    return key[0] == 't' ? message.TxnId == id : message.TxnId.empty() && message.EventId == id;
+}
+
+// The window starts with this many of the newest messages, more than a screen of short ones, and grows or
+// shrinks by WindowStep messages as the screen comes near its edges
+constexpr size_t InitialWindow = 30;
+constexpr NSInteger WindowStep = 10;
+
 // Everything the text of a message depends on besides its key; strings as hashes, so that comparing the
 // states of thousands of messages allocates nothing
 struct TItemState {
@@ -50,6 +66,7 @@ struct TItemState {
     size_t Sender = 0;  // the shown name, when ShowSender
     size_t Avatar = 0;  // the avatar's mxc URI, when ShowSender and there is one
     bool HasImage = false;
+    bool Loading = false;
 
     bool operator==(const TItemState&) const = default;
 };
@@ -68,9 +85,25 @@ struct TItemState {
     NSArray<NSAttributedString*>* _items;
     std::vector<NSUInteger> _itemOffsets;  // where each item starts in the text
     std::vector<TItemState> _itemStates;  // what each of _items was built from
+    // The window: _items are the room's messages from its first to its last key. _windowStart is the index of
+    // the first one among all of the room's, _windowTotal their number.
+    std::string _windowFirstKey;
+    std::string _windowLastKey;
+    BOOL _windowAtEnd;
+    size_t _windowStart;
+    size_t _windowTotal;
+    // Asked by adjustWindow for the next update: messages to add or drop at each end
+    NSInteger _growTop;
+    NSInteger _growBottom;
+    NSInteger _trimTop;
+    NSInteger _trimBottom;
+    BOOL _resetToEnd;  // the next update shows the newest messages
+    BOOL _updating;    // inside stateChanged: its own scrolling must not start another update
+    HSSenderMeta* _leadSender;  // the avatar of the series the window starts in, when its start is outside
     // The avatar of a series whose start, with its own avatar, scrolled off the top: a letter, or a picture over it
     UILabel* _sticky;
     UIImageView* _stickyImage;
+    HSSenderMeta* _stickySender;  // what _sticky shows now
     // Composer: Return inserts a line break, the button sends; it grows up to MaxInputLines, then scrolls
     UIView* _composer;
     UITextView* _input;
@@ -260,10 +293,33 @@ static const CGFloat MaxInputLines = 6;
 }
 
 - (void)toBottomTapped {
-    [self scrollToBottomAnimated:YES];
+    if (_windowAtEnd) {
+        [self scrollToBottomAnimated:YES];
+        return;
+    }
+    // The newest messages are not in the window: the window jumps there
+    _resetToEnd = YES;
+    [self stateChanged];
 }
 
 #pragma mark - Building the text
+
+// The avatar next to a name: the member's picture when it is here, else the first letter of the name without
+// the "@" of a bare user id, in the person's color
+- (HSSenderMeta*)avatarOfSender:(const std::string&)userId room:(const NHoshi::TRoom&)room {
+    const auto name = room.MemberNames.find(userId);
+    NSString* sender = ToNs(name == room.MemberNames.end() ? userId : name->second);
+    HSSenderMeta* avatar = [[HSSenderMeta alloc] init];
+    NSString* letters = [sender hasPrefix:@"@"] && sender.length > 1 ? [sender substringFromIndex:1] : sender;
+    avatar.initial = letters.length > 0
+        ? [letters substringWithRange:[letters rangeOfComposedCharacterSequenceAtIndex:0]].localizedUppercaseString : @"?";
+    avatar.color = SenderColor(userId);
+    if (const auto url = room.MemberAvatars.find(userId); url != room.MemberAvatars.end()) {
+        avatar.image = [_session avatarForMxc:url->second];
+        avatar.loading = !avatar.image && [_session avatarIsLoading:url->second];
+    }
+    return avatar;
+}
 
 - (NSAttributedString*)itemForMessage:(const NHoshi::TMessage&)message showSender:(BOOL)showSender
                                  showTime:(BOOL)showTime room:(const NHoshi::TRoom&)room {
@@ -281,15 +337,7 @@ static const CGFloat MaxInputLines = 6;
         NSString* sender = ToNs(name == room.MemberNames.end() ? message.Sender : name->second);
         UIFont* font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
         font = [UIFont fontWithDescriptor:[font.fontDescriptor fontDescriptorWithSymbolicTraits:UIFontDescriptorTraitBold] size:0];
-        // The avatar next to the name: for now the first letter of the name, without the "@" of a bare user id
-        HSSenderMeta* avatar = [[HSSenderMeta alloc] init];
-        NSString* letters = [sender hasPrefix:@"@"] && sender.length > 1 ? [sender substringFromIndex:1] : sender;
-        avatar.initial = letters.length > 0
-            ? [letters substringWithRange:[letters rangeOfComposedCharacterSequenceAtIndex:0]].localizedUppercaseString : @"?";
-        avatar.color = SenderColor(message.Sender);
-        if (const auto url = room.MemberAvatars.find(message.Sender); url != room.MemberAvatars.end()) {
-            avatar.image = [_session avatarForMxc:url->second];
-        }
+        HSSenderMeta* avatar = [self avatarOfSender:message.Sender room:room];
         [item appendAttributedString:[[NSAttributedString alloc] initWithString:[sender stringByAppendingString:@"\n"] attributes:@{
             NSFontAttributeName: font,
             NSForegroundColorAttributeName: SenderColor(message.Sender),
@@ -338,20 +386,27 @@ static const CGFloat MaxInputLines = 6;
     return item;
 }
 
-// Puts the new items into the text. When the old messages are still there in the same order, only what
-// changed is edited: older messages go in front, newer ones at the end, so a selection the user is making
-// survives a new message. Returns how an old character offset maps to the new text.
+// Puts the new items into the text. The old and the new messages usually share a run in the same order: the
+// window moved or grew, or messages came at an end. Then only the edges and the changed messages of the run
+// are edited, so a selection the user is making survives. Returns how an old character offset maps to the new
+// text; an offset in a part that went away maps to the nearest end of the shared run.
 - (std::function<NSUInteger(NSUInteger)>)applyItems:(NSArray<NSAttributedString*>*)items keys:(const std::vector<std::string>&)keys {
     NSTextStorage* storage = _text.textStorage;
-    size_t prepended = 0;
-    bool incremental = !_keys.empty() && keys.size() >= _keys.size();
-    if (incremental) {
-        const auto first = std::find(keys.begin(), keys.end(), _keys.front());
-        prepended = static_cast<size_t>(first - keys.begin());
-        incremental = first != keys.end() && prepended + _keys.size() <= keys.size() &&
-            std::equal(_keys.begin(), _keys.end(), first);
+    // The shared run: old[from, from + count) == new[at, at + count)
+    size_t from = 0;
+    size_t at = 0;
+    size_t count = 0;
+    for (; from < _keys.size(); ++from) {
+        const auto found = std::find(keys.begin(), keys.end(), _keys[from]);
+        if (found != keys.end()) {
+            at = static_cast<size_t>(found - keys.begin());
+            break;
+        }
     }
-    if (!incremental) {
+    while (from + count < _keys.size() && at + count < keys.size() && _keys[from + count] == keys[at + count]) {
+        ++count;
+    }
+    if (count == 0) {
         NSMutableAttributedString* all = [[NSMutableAttributedString alloc] init];
         for (NSAttributedString* item in items) {
             [all appendAttributedString:item];
@@ -363,7 +418,7 @@ static const CGFloat MaxInputLines = 6;
     }
 
     struct TEdit {
-        NSUInteger Location;  // in the old text
+        NSUInteger Location;  // in the old text, from the start of the run
         NSUInteger OldLength;
         NSUInteger NewLength;
     };
@@ -374,37 +429,53 @@ static const CGFloat MaxInputLines = 6;
         offsets.push_back(offset);
         offset += item.length;
     }
+    offsets.push_back(offset);  // the end of the old text
+    const NSUInteger runStart = offsets[from];
+    const NSUInteger runEnd = offsets[from + count];
 
     [storage beginEditing];
+    // From the end backwards, so the offsets not yet visited stay valid: the old messages after the run go,
+    // the new ones after it come, the run's changed messages are replaced, then the same before the run
     NSMutableAttributedString* tail = [[NSMutableAttributedString alloc] init];
-    for (size_t i = prepended + _keys.size(); i < keys.size(); ++i) {
+    for (size_t i = at + count; i < keys.size(); ++i) {
         [tail appendAttributedString:items[i]];
     }
-    [storage appendAttributedString:tail];
-    // Backwards, so the offsets of the items not yet visited stay valid
-    for (size_t i = _keys.size(); i-- > 0;) {
-        NSAttributedString* now = items[prepended + i];
-        if (_items[i] != now && ![_items[i] isEqualToAttributedString:now]) {
-            [storage replaceCharactersInRange:NSMakeRange(offsets[i], _items[i].length) withAttributedString:now];
-            edits.push_back({offsets[i], _items[i].length, now.length});
+    [storage replaceCharactersInRange:NSMakeRange(runEnd, storage.length - runEnd) withAttributedString:tail];
+    for (size_t i = count; i-- > 0;) {
+        NSAttributedString* was = _items[from + i];
+        NSAttributedString* now = items[at + i];
+        if (was != now && ![was isEqualToAttributedString:now]) {
+            [storage replaceCharactersInRange:NSMakeRange(offsets[from + i], was.length) withAttributedString:now];
+            edits.push_back({offsets[from + i] - runStart, was.length, now.length});
         }
     }
     NSMutableAttributedString* head = [[NSMutableAttributedString alloc] init];
-    for (size_t i = 0; i < prepended; ++i) {
+    for (size_t i = 0; i < at; ++i) {
         [head appendAttributedString:items[i]];
     }
-    [storage insertAttributedString:head atIndex:0];
+    [storage replaceCharactersInRange:NSMakeRange(0, runStart) withAttributedString:head];
     [storage endEditing];
 
     _keys = keys;
     _items = items;
     const NSUInteger headLength = head.length;
-    return [edits, headLength](NSUInteger old) {
-        NSInteger moved = static_cast<NSInteger>(old + headLength);
+    NSUInteger runLength = runEnd - runStart;
+    for (const auto& edit : edits) {
+        runLength += edit.NewLength - edit.OldLength;
+    }
+    return [edits, headLength, runStart, runEnd, runLength](NSUInteger old) {
+        if (old <= runStart) {
+            return headLength;
+        }
+        if (old >= runEnd) {
+            return headLength + runLength;
+        }
+        const NSUInteger inRun = old - runStart;
+        NSInteger moved = static_cast<NSInteger>(inRun + headLength);
         for (const auto& edit : edits) {
-            if (edit.Location + edit.OldLength <= old) {
+            if (edit.Location + edit.OldLength <= inRun) {
                 moved += static_cast<NSInteger>(edit.NewLength) - static_cast<NSInteger>(edit.OldLength);
-            } else if (edit.Location < old) {
+            } else if (edit.Location < inRun) {
                 moved = static_cast<NSInteger>(edit.Location + headLength);  // inside a changed message: its start
             }
         }
@@ -466,7 +537,7 @@ static const CGFloat MaxInputLines = 6;
 }
 
 - (void)updateToBottomButton {
-    const BOOL show = !_keys.empty() && ![self isNearBottom];
+    const BOOL show = !_keys.empty() && (![self isNearBottom] || !_windowAtEnd);
     if (_toBottom.hidden == !show) {
         return;
     }
@@ -490,6 +561,7 @@ static const CGFloat MaxInputLines = 6;
         return;
     }
     const CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
+    _updating = YES;
     const NHoshi::TRoom& room = it->second;
     self.title = ToNs(room.DisplayName(_session.userId.UTF8String));
     _hasOlder = !room.HistoryComplete;
@@ -504,25 +576,57 @@ static const CGFloat MaxInputLines = 6;
     for (const auto& message : room.Pending) {
         messages.push_back(&message);
     }
+    // The window: the messages in the text, a run of the room's messages around what is on screen. It follows
+    // its first and last message across updates, then grows or shrinks as scrolling asked.
+    const size_t total = messages.size();
+    auto indexOf = [&](const std::string& key, size_t hint) -> size_t {
+        // Usually where it was, or moved by a page of history that came in front: look there first
+        for (size_t i = hint; i < std::min(total, hint + 200); ++i) {
+            if (HasKey(*messages[i], key)) {
+                return i;
+            }
+        }
+        for (size_t i = total; i-- > 0;) {
+            if (HasKey(*messages[i], key)) {
+                return i;
+            }
+        }
+        return total;
+    };
+    size_t start = total;
+    size_t end = total;
+    if (!_keys.empty() && !_resetToEnd) {
+        start = indexOf(_windowFirstKey, _windowStart);
+        end = _windowAtEnd ? total : std::min(total, indexOf(_windowLastKey, start) + 1);
+    }
+    if (start >= total || end <= start) {
+        // First fill, a jump to the newest messages, or the window's messages are gone: the end of the room
+        start = total > InitialWindow ? total - InitialWindow : 0;
+        end = total;
+    } else {
+        start = std::min(start - std::min<size_t>(start, static_cast<size_t>(_growTop)) + static_cast<size_t>(_trimTop), end - 1);
+        end = std::max(std::min(total, end + static_cast<size_t>(_growBottom)) - static_cast<size_t>(_trimBottom), start + 1);
+    }
+    _growTop = _growBottom = _trimTop = _trimBottom = 0;
+    const bool jumpedToEnd = _resetToEnd;
+    _resetToEnd = NO;
+    _windowStart = start;
+
     std::vector<std::string> keys;
-    keys.reserve(messages.size());
-    for (const auto* message : messages) {
-        keys.push_back(KeyOf(*message));
+    keys.reserve(end - start);
+    for (size_t i = start; i < end; ++i) {
+        keys.push_back(KeyOf(*messages[i]));
     }
-    // The previous update's message at the same place: older messages, if any came, are in front
-    size_t shift = 0;
-    bool aligned = false;
-    if (!_keys.empty()) {
-        const auto first = std::find(keys.begin(), keys.end(), _keys.front());
-        shift = static_cast<size_t>(first - keys.begin());
-        aligned = first != keys.end();
+    // An unchanged message reuses its text from the last update. Unchanged means equal in everything its text
+    // depends on, compared without building anything.
+    std::unordered_map<std::string, size_t> previous;
+    for (size_t i = 0; i < _keys.size(); ++i) {
+        previous.emplace(_keys[i], i);
     }
-    // An unchanged message reuses its text: building all of them each time took most of an update in a room of
-    // thousands. Unchanged means equal in everything its text depends on, compared without building anything.
     std::vector<TItemState> states;
-    states.reserve(messages.size());
-    NSMutableArray<NSAttributedString*>* items = [NSMutableArray arrayWithCapacity:messages.size()];
-    for (size_t i = 0; i < messages.size(); ++i) {
+    states.reserve(end - start);
+    NSMutableArray<NSAttributedString*>* items = [NSMutableArray arrayWithCapacity:end - start];
+    for (size_t i = start; i < end; ++i) {
         const NHoshi::TMessage& message = *messages[i];
         TItemState state;
         state.ShowSender = i == 0 || messages[i - 1]->Sender != message.Sender;
@@ -539,11 +643,12 @@ static const CGFloat MaxInputLines = 6;
             if (avatar != room.MemberAvatars.end()) {
                 state.Avatar = std::hash<std::string>{}(avatar->second);
                 state.HasImage = [_session avatarForMxc:avatar->second] != nil;
+                state.Loading = !state.HasImage && [_session avatarIsLoading:avatar->second];
             }
         }
         NSAttributedString* item = nil;
-        if (aligned && i >= shift && i - shift < _keys.size() && _keys[i - shift] == keys[i] && _itemStates[i - shift] == state) {
-            item = _items[i - shift];
+        if (const auto was = previous.find(keys[i - start]); was != previous.end() && _itemStates[was->second] == state) {
+            item = _items[was->second];
         } else {
             item = [self itemForMessage:message showSender:state.ShowSender showTime:state.ShowTime room:room];
         }
@@ -569,8 +674,17 @@ static const CGFloat MaxInputLines = 6;
     const NSRange selection = _text.selectedRange;
 
     const CFAbsoluteTime anchored = CFAbsoluteTimeGetCurrent();
+    const bool wasAtEnd = _windowAtEnd;
     const auto moved = [self applyItems:items keys:keys];
     const CFAbsoluteTime applied = CFAbsoluteTimeGetCurrent();
+    _windowFirstKey = keys.empty() ? std::string() : keys.front();
+    _windowLastKey = keys.empty() ? std::string() : keys.back();
+    _windowAtEnd = end == total;
+    // The series the window starts in, when its start with the name and avatar is outside the window
+    _leadSender = nil;
+    if (start > 0 && start < total && messages[start - 1]->Sender == messages[start]->Sender) {
+        _leadSender = [self avatarOfSender:messages[start]->Sender room:room];
+    }
     _textLayoutMs = 0;
     _viewLayoutMs = 0;
     _itemOffsets.clear();
@@ -590,13 +704,13 @@ static const CGFloat MaxInputLines = 6;
         }
     }
 
-    if (first || _sentSinceUpdate) {
+    if (first || _sentSinceUpdate || jumpedToEnd) {
         _sentSinceUpdate = NO;
         [self scrollToBottomAnimated:NO];
         if (first) {
             [self selectFromLaunchArguments];
         }
-    } else if (atBottom) {
+    } else if (atBottom && wasAtEnd) {
         // New messages scroll into view only for someone already at the bottom, not for someone reading history
         [self scrollToBottomAnimated:YES];
     } else if (id<NSTextLocation> location = [self locationOfOffset:std::min(moved(anchor), length)]) {
@@ -620,6 +734,49 @@ static const CGFloat MaxInputLines = 6;
             (CFAbsoluteTimeGetCurrent() - scrolled) * 1000];
         [self stressHistoryAfterUpdateFrom:started anchor:first ? NSNotFound : moved(anchor)];
     }
+    _windowTotal = total;
+    _updating = NO;
+    [self adjustWindow];
+}
+
+// Keeps the window about half a screen beyond each edge of the screen: grows it where the margin got thinner,
+// and drops messages more than three quarters of a screen away, unless a selection may reach them. Runs an
+// update when it changed the window, which comes back here; the depth stops a loop between the two.
+- (void)adjustWindow {
+    static int depth = 0;
+    if (depth > 8 || _keys.empty()) {
+        return;
+    }
+    const CGFloat screen = _text.bounds.size.height - _text.adjustedContentInset.top - _text.adjustedContentInset.bottom;
+    const CGFloat visibleTop = _text.contentOffset.y + _text.adjustedContentInset.top;
+    const CGFloat visibleBottom = visibleTop + screen;
+    if (_windowStart > 0 && visibleTop < screen / 2) {
+        _growTop = WindowStep;
+    }
+    if (!_windowAtEnd && _text.contentSize.height - visibleBottom < screen / 2) {
+        _growBottom = WindowStep;
+    }
+    // A selection the user is making may still be dragged anywhere in the window: nothing goes then
+    if (_text.selectedRange.length == 0 && _items.count > 1) {
+        const CGFloat keepAbove = visibleTop - screen * 3 / 4;
+        const CGFloat keepBelow = visibleBottom + screen * 3 / 4;
+        // One lookup per edge: the message at that height, and all beyond it go
+        size_t trimTop = 0;
+        if (keepAbove > 0) {
+            trimTop = [self itemAtY:keepAbove];
+        }
+        size_t trimBottom = 0;
+        if (keepBelow < _text.contentSize.height) {
+            trimBottom = _items.count - 1 - std::max([self itemAtY:keepBelow], trimTop);
+        }
+        _trimTop = _growTop ? 0 : static_cast<NSInteger>(trimTop);
+        _trimBottom = _growBottom ? 0 : static_cast<NSInteger>(trimBottom);
+    }
+    if (_growTop || _growBottom || _trimTop || _trimBottom) {
+        ++depth;
+        [self stateChanged];
+        --depth;
+    }
 }
 
 // "-HSStressHistory YES": keeps scrolling to the top until the whole history is loaded, and writes to
@@ -636,14 +793,14 @@ static const CGFloat MaxInputLines = 6;
         stayed = now == anchor ? @"yes" : [NSString stringWithFormat:@"NO (%lu -> %lu)", static_cast<unsigned long>(anchor),
                                                                       static_cast<unsigned long>(now)];
     }
-    [report appendFormat:@"messages %zu, update %.1f ms (%@), top line stayed %@, more %d\n", _keys.size(), ms, _stressSplit, stayed,
-        _hasOlder];
+    [report appendFormat:@"messages %zu, window %zu from %zu, update %.1f ms (%@), top line stayed %@, more %d\n", _windowTotal,
+        _keys.size(), _windowStart, ms, _stressSplit, stayed, _hasOlder];
     NSURL* documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     [report writeToURL:[documents URLByAppendingPathComponent:@"history.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    if (_hasOlder) {
+    if (_hasOlder || _windowStart > 0) {
         // Like a user who scrolled up to read: a little below the very top, so the anchor has something to hold
         __weak TimelineViewController* weakSelf = self;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 10), dispatch_get_main_queue(), ^{
             TimelineViewController* strongSelf = weakSelf;
             if (strongSelf) {
                 strongSelf->_text.contentOffset = CGPointMake(0, 100 - strongSelf->_text.adjustedContentInset.top);
@@ -730,7 +887,8 @@ static const CGFloat MaxInputLines = 6;
 }
 
 - (void)loadOlderIfNeeded {
-    if (_loadingOlder || !_hasOlder) {
+    // Older messages already here come in by growing the window; the server is asked only at the room's start
+    if (_loadingOlder || !_hasOlder || _windowStart > 0) {
         return;
     }
     // Near the top, or the loaded messages do not even fill the screen
@@ -756,11 +914,26 @@ static const CGFloat MaxInputLines = 6;
     [self loadOlderIfNeeded];
     [self updateToBottomButton];
     [self updateStickyAvatar];
+    if (!_updating) {
+        [self adjustWindow];  // an update moves the offset itself, and adjusts the window at its end
+    }
 }
 
 - (nullable HSSenderMeta*)senderOfItem:(size_t)index {
     NSAttributedString* item = _items[index];
     return item.length > 0 ? [item attribute:HSSenderMetaAttribute atIndex:0 effectiveRange:nullptr] : nil;
+}
+
+// The index in _items of the message at a height in content coordinates
+- (size_t)itemAtY:(CGFloat)y {
+    NSTextLayoutFragment* fragment = [_text.textLayoutManager textLayoutFragmentForPosition:
+        CGPointMake(HSBubbleSide * 2, MAX(y - _text.textContainerInset.top, 0))];
+    if (!fragment || _itemOffsets.empty()) {
+        return 0;
+    }
+    const NSUInteger offset = [self offsetOfLocation:fragment.rangeInElement.location];
+    const auto after = std::upper_bound(_itemOffsets.begin(), _itemOffsets.end(), offset);
+    return after == _itemOffsets.begin() ? 0 : static_cast<size_t>(after - _itemOffsets.begin()) - 1;
 }
 
 // Top of the item's first paragraph, in the text view's content coordinates
@@ -774,40 +947,51 @@ static const CGFloat MaxInputLines = 6;
 // are still visible, and the next series pushes it up and away
 - (void)updateStickyAvatar {
     const CGFloat top = _text.contentOffset.y + _text.adjustedContentInset.top;
-    NSTextLayoutFragment* fragment = _items.count == 0 ? nil
-        : [_text.textLayoutManager textLayoutFragmentForPosition:CGPointMake(HSBubbleSide * 2, MAX(top - _text.textContainerInset.top, 0))];
-    if (!fragment) {
+    if (_items.count == 0 || _itemStates.size() != _items.count) {
         _sticky.hidden = YES;
         return;
     }
-    const NSUInteger offset = [self offsetOfLocation:fragment.rangeInElement.location];
-    const auto after = std::upper_bound(_itemOffsets.begin(), _itemOffsets.end(), offset);
-    size_t start = after == _itemOffsets.begin() ? 0 : static_cast<size_t>(after - _itemOffsets.begin()) - 1;
-    while (start > 0 && ![self senderOfItem:start]) {
+    // Where series start is known from the items' states; only the positions need TextKit
+    size_t start = [self itemAtY:top];
+    while (start > 0 && !_itemStates[start].ShowSender) {
         --start;
     }
-    HSSenderMeta* sender = [self senderOfItem:start];
+    HSSenderMeta* sender = _itemStates[start].ShowSender ? [self senderOfItem:start] : nil;
+    // The series began before the window: its name is not in the text at all
+    const bool outside = !sender && start == 0;
+    if (outside) {
+        sender = _leadSender;
+    }
     size_t next = start + 1;
-    while (next < _items.count && ![self senderOfItem:next]) {
+    while (next < _items.count && !_itemStates[next].ShowSender) {
         ++next;
     }
     // The name line with its own avatar is still on screen: no second one
-    const CGFloat nameBottom = [self topOfItem:start] + 10 + HSBubblePadY + HSAvatarSize;
+    const CGFloat nameBottom = outside ? -CGFLOAT_MAX : [self topOfItem:start] + 10 + HSBubblePadY + HSAvatarSize;
     if (!sender || nameBottom > top) {
         _sticky.hidden = YES;
         return;
     }
     const CGFloat seriesBottom = next < _items.count ? [self topOfItem:next] + 10 : _text.contentSize.height;
     const CGFloat y = MIN(top + 6, seriesBottom - HSAvatarSize);
-    _sticky.text = sender.initial;
-    _sticky.backgroundColor = sender.color;
-    _stickyImage.image = sender.image;
-    // A ring of the background color, so it lies cleanly over the times it passes
-    _sticky.layer.borderWidth = 2;
-    _sticky.layer.borderColor = [UIColor.systemBackgroundColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
-    _sticky.frame = CGRectMake(HSBubbleSide, y, HSAvatarSize, HSAvatarSize);
-    _sticky.hidden = NO;
-    [_text bringSubviewToFront:_sticky];
+    // Only what changed: this runs on every scroll step, and each property set is work for the render server
+    if (_stickySender != sender) {
+        _stickySender = sender;
+        _sticky.text = sender.loading ? nil : sender.initial;
+        _sticky.backgroundColor = sender.loading ? UIColor.tertiarySystemFillColor : sender.color;
+        _stickyImage.image = sender.image;
+        // A ring of the background color, so it lies cleanly over the times it passes
+        _sticky.layer.borderWidth = 2;
+        _sticky.layer.borderColor = [UIColor.systemBackgroundColor resolvedColorWithTraitCollection:self.traitCollection].CGColor;
+    }
+    const CGRect frame = CGRectMake(HSBubbleSide, y, HSAvatarSize, HSAvatarSize);
+    if (!CGRectEqualToRect(_sticky.frame, frame)) {
+        _sticky.frame = frame;
+    }
+    if (_sticky.hidden) {
+        _sticky.hidden = NO;
+        [_text bringSubviewToFront:_sticky];
+    }
 }
 
 #pragma mark - Retry

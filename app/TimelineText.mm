@@ -34,7 +34,8 @@ const CGFloat HSBubblePadY = 7;
         return NO;
     }
     HSSenderMeta* meta = other;
-    return [meta.initial isEqualToString:_initial] && [meta.color isEqual:_color] && meta.image == _image;
+    return [meta.initial isEqualToString:_initial] && [meta.color isEqual:_color] && meta.image == _image &&
+        meta.loading == _loading;
 }
 
 - (NSUInteger)hash {
@@ -125,6 +126,20 @@ UIFont* TimeFont() {
         return;
     }
     UITraitCollection* traits = UITraitCollection.currentTraitCollection;
+    if (sender.loading) {
+        // A quiet placeholder rather than the letter, which would flash before the picture replaces it. Still,
+        // not spinning: an animation here would redraw the text every frame.
+        [[UIColor.tertiarySystemFillColor resolvedColorWithTraitCollection:traits] setFill];
+        [[UIBezierPath bezierPathWithOvalInRect:circle] fill];
+        UIBezierPath* ring = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(circle, 1, 1)];
+        const CGFloat dash[] = {2, 3};
+        [ring setLineDash:dash count:2 phase:0];
+        ring.lineWidth = 1;
+        [[UIColor.tertiaryLabelColor resolvedColorWithTraitCollection:traits] setStroke];
+        [ring stroke];
+        UIGraphicsPopContext();
+        return;
+    }
     [[sender.color resolvedColorWithTraitCollection:traits] setFill];
     [[UIBezierPath bezierPathWithOvalInRect:circle] fill];
     UIFont* font = [UIFont systemFontOfSize:HSAvatarSize * 0.45 weight:UIFontWeightSemibold];

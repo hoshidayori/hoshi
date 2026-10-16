@@ -30,6 +30,8 @@ extern NSAttributedStringKey const HSMessageMetaAttribute;
 @property (nonatomic, copy) NSString* initial;  // shown until there is a picture
 @property (nonatomic, strong) UIColor* color;
 @property (nonatomic, strong, nullable) UIImage* image;
+// The member has a picture that is still on its way: a placeholder is drawn instead of the letter
+@property (nonatomic) BOOL loading;
 @end
 
 extern NSAttributedStringKey const HSSenderMetaAttribute;
