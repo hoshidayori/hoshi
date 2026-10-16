@@ -82,6 +82,8 @@ struct TItemState {
     BOOL _loadingOlder;
     BOOL _sentSinceUpdate;
     NSString* _stressSplit;  // -HSStressHistory: where the last update's time went
+    double _textLayoutMs;    // within an update: TextKit's layout, and the text view's own layout after it
+    double _viewLayoutMs;
 }
 
 static const CGFloat MaxInputLines = 6;
@@ -434,10 +436,14 @@ static const CGFloat MaxInputLines = 6;
     const NSUInteger length = _text.textStorage.length;
     id<NSTextLocation> start = [self locationOfOffset:std::min(from, length)];
     id<NSTextLocation> end = [self locationOfOffset:std::min(std::max(from, to), length)];
+    const CFAbsoluteTime began = CFAbsoluteTimeGetCurrent();
     if (start && end) {
         [_text.textLayoutManager ensureLayoutForRange:[[NSTextRange alloc] initWithLocation:start endLocation:end]];
     }
+    const CFAbsoluteTime laidOut = CFAbsoluteTimeGetCurrent();
     [_text layoutIfNeeded];
+    _textLayoutMs += (laidOut - began) * 1000;
+    _viewLayoutMs += (CFAbsoluteTimeGetCurrent() - laidOut) * 1000;
     // A few messages sit at the bottom, next to the composer, as in other messengers
     const CGFloat visible = _text.bounds.size.height - _text.safeAreaInsets.top - _text.safeAreaInsets.bottom;
     const CGFloat free = MAX(0, visible - _text.contentSize.height);
@@ -562,8 +568,11 @@ static const CGFloat MaxInputLines = 6;
     }
     const NSRange selection = _text.selectedRange;
 
+    const CFAbsoluteTime anchored = CFAbsoluteTimeGetCurrent();
     const auto moved = [self applyItems:items keys:keys];
     const CFAbsoluteTime applied = CFAbsoluteTimeGetCurrent();
+    _textLayoutMs = 0;
+    _viewLayoutMs = 0;
     _itemOffsets.clear();
     NSUInteger itemOffset = 0;
     for (NSAttributedString* item in _items) {
@@ -599,12 +608,16 @@ static const CGFloat MaxInputLines = 6;
             _text.contentOffset = CGPointMake(0, fragment.layoutFragmentFrame.origin.y + _text.textContainerInset.top - anchorShift);
         }
     }
+    const CFAbsoluteTime scrolled = CFAbsoluteTimeGetCurrent();
     [self loadOlderIfNeeded];
     [self updateToBottomButton];
     [self updateStickyAvatar];
     if ([NSUserDefaults.standardUserDefaults boolForKey:@"HSStressHistory"]) {
-        _stressSplit = [NSString stringWithFormat:@"build %.1f, edit %.1f, layout and scroll %.1f",
-            (built - started) * 1000, (applied - built) * 1000, (CFAbsoluteTimeGetCurrent() - applied) * 1000];
+        const double rest = (scrolled - applied) * 1000 - _textLayoutMs - _viewLayoutMs;
+        _stressSplit = [NSString stringWithFormat:@"build %.1f, anchor %.1f, edit %.1f, TextKit layout %.1f, view layout %.1f, "
+            "offsets and scroll %.1f, sticky avatar %.1f",
+            (built - started) * 1000, (anchored - built) * 1000, (applied - anchored) * 1000, _textLayoutMs, _viewLayoutMs, rest,
+            (CFAbsoluteTimeGetCurrent() - scrolled) * 1000];
         [self stressHistoryAfterUpdateFrom:started anchor:first ? NSNotFound : moved(anchor)];
     }
 }
