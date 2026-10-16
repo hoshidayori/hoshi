@@ -114,7 +114,9 @@ std::int64_t NowMs() {
     std::optional<NHoshi::NVerification::TVerification> _verification;      // main-queue copy
     std::uint64_t _verificationShown;                                      // main queue: the version of that copy
 
-    NHoshi::TSyncState _state;  // main-queue copy for the screens
+    // Main queue: the latest snapshot for the screens, shared rather than copied again (a long room is thousands
+    // of messages)
+    std::shared_ptr<const NHoshi::TSyncState> _state;
     std::string _deviceId;      // main queue only
     std::string _accessToken;   // main queue only
 }
@@ -257,16 +259,18 @@ std::int64_t NowMs() {
 }
 
 - (const NHoshi::TSyncState&)state {
-    return _state;
+    static const NHoshi::TSyncState empty;
+    return _state ? *_state : empty;
 }
 
-// Copies the shared state to the main queue and tells the screens
+// Hands a snapshot of the shared state to the main queue and tells the screens. The snapshot is a copy made
+// for this, and nothing changes it afterwards.
 - (void)publish:(std::shared_ptr<NHoshi::TSyncState>)snapshot {
     __weak HSSession* weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
         HSSession* strongSelf = weakSelf;
         if (strongSelf) {
-            strongSelf->_state = *snapshot;
+            strongSelf->_state = snapshot;
             [NSNotificationCenter.defaultCenter postNotificationName:HSSessionStateDidChange object:strongSelf];
         }
     });

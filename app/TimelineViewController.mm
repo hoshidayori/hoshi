@@ -38,6 +38,22 @@ std::string KeyOf(const NHoshi::TMessage& message) {
     return message.TxnId.empty() ? "e:" + message.EventId : "t:" + message.TxnId;
 }
 
+// Everything the text of a message depends on besides its key; strings as hashes, so that comparing the
+// states of thousands of messages allocates nothing
+struct TItemState {
+    bool ShowSender = false;
+    bool ShowTime = false;
+    int SendState = 0;
+    bool WaitingForKey = false;
+    std::int64_t Minute = 0;
+    size_t Body = 0;
+    size_t Sender = 0;  // the shown name, when ShowSender
+    size_t Avatar = 0;  // the avatar's mxc URI, when ShowSender and there is one
+    bool HasImage = false;
+
+    bool operator==(const TItemState&) const = default;
+};
+
 } // namespace
 
 @interface TimelineViewController () <UITextViewDelegate, UIGestureRecognizerDelegate>
@@ -51,7 +67,7 @@ std::string KeyOf(const NHoshi::TMessage& message) {
     std::vector<std::string> _keys;
     NSArray<NSAttributedString*>* _items;
     std::vector<NSUInteger> _itemOffsets;  // where each item starts in the text
-    NSDictionary<NSString*, NSAttributedString*>* _itemCache;  // the last update's items by what they depend on
+    std::vector<TItemState> _itemStates;  // what each of _items was built from
     // The avatar of a series whose start, with its own avatar, scrolled off the top: a letter, or a picture over it
     UILabel* _sticky;
     UIImageView* _stickyImage;
@@ -366,7 +382,7 @@ static const CGFloat MaxInputLines = 6;
     // Backwards, so the offsets of the items not yet visited stay valid
     for (size_t i = _keys.size(); i-- > 0;) {
         NSAttributedString* now = items[prepended + i];
-        if (![_items[i] isEqualToAttributedString:now]) {
+        if (_items[i] != now && ![_items[i] isEqualToAttributedString:now]) {
             [storage replaceCharactersInRange:NSMakeRange(offsets[i], _items[i].length) withAttributedString:now];
             edits.push_back({offsets[i], _items[i].length, now.length});
         }
@@ -472,39 +488,63 @@ static const CGFloat MaxInputLines = 6;
     self.title = ToNs(room.DisplayName(_session.userId.UTF8String));
     _hasOlder = !room.HistoryComplete;
 
-    // Messages still being sent from this device come after everything the server has confirmed
-    std::vector<NHoshi::TMessage> messages = room.Timeline;
-    messages.insert(messages.end(), room.Pending.begin(), room.Pending.end());
+    // Messages still being sent from this device come after everything the server has confirmed. Pointers,
+    // not copies: a long room has thousands.
+    std::vector<const NHoshi::TMessage*> messages;
+    messages.reserve(room.Timeline.size() + room.Pending.size());
+    for (const auto& message : room.Timeline) {
+        messages.push_back(&message);
+    }
+    for (const auto& message : room.Pending) {
+        messages.push_back(&message);
+    }
     std::vector<std::string> keys;
+    keys.reserve(messages.size());
+    for (const auto* message : messages) {
+        keys.push_back(KeyOf(*message));
+    }
+    // The previous update's message at the same place: older messages, if any came, are in front
+    size_t shift = 0;
+    bool aligned = false;
+    if (!_keys.empty()) {
+        const auto first = std::find(keys.begin(), keys.end(), _keys.front());
+        shift = static_cast<size_t>(first - keys.begin());
+        aligned = first != keys.end();
+    }
+    // An unchanged message reuses its text: building all of them each time took most of an update in a room of
+    // thousands. Unchanged means equal in everything its text depends on, compared without building anything.
+    std::vector<TItemState> states;
+    states.reserve(messages.size());
     NSMutableArray<NSAttributedString*>* items = [NSMutableArray arrayWithCapacity:messages.size()];
-    // An unchanged message reuses its text from the last update: building all of them each time took a
-    // noticeable part of an update in a long room
-    NSMutableDictionary<NSString*, NSAttributedString*>* cache = [NSMutableDictionary dictionaryWithCapacity:messages.size()];
     for (size_t i = 0; i < messages.size(); ++i) {
-        const NHoshi::TMessage& message = messages[i];
-        const bool showSender = i == 0 || messages[i - 1].Sender != message.Sender;
+        const NHoshi::TMessage& message = *messages[i];
+        TItemState state;
+        state.ShowSender = i == 0 || messages[i - 1]->Sender != message.Sender;
         // The time only where it changes, or a new series starts; a column of the same minute says nothing
-        const bool showTime = showSender || messages[i - 1].OriginServerTs / 60000 != message.OriginServerTs / 60000;
-        keys.push_back(KeyOf(message));
-        // Everything the text of the message depends on
-        std::string signature = keys.back() + "|" + std::to_string(showSender) + std::to_string(showTime) +
-            std::to_string(static_cast<int>(message.SendState)) + std::to_string(message.IsWaitingForKey()) + "|" +
-            std::to_string(message.OriginServerTs / 60000) + "|" + message.Body;
-        if (showSender) {
+        state.ShowTime = state.ShowSender || messages[i - 1]->OriginServerTs / 60000 != message.OriginServerTs / 60000;
+        state.SendState = static_cast<int>(message.SendState);
+        state.WaitingForKey = message.IsWaitingForKey();
+        state.Minute = message.OriginServerTs / 60000;
+        state.Body = std::hash<std::string>{}(message.Body);
+        if (state.ShowSender) {
             const auto name = room.MemberNames.find(message.Sender);
             const auto avatar = room.MemberAvatars.find(message.Sender);
-            signature += "|" + (name == room.MemberNames.end() ? std::string() : name->second);
+            state.Sender = std::hash<std::string>{}(name == room.MemberNames.end() ? message.Sender : name->second);
             if (avatar != room.MemberAvatars.end()) {
-                signature += "|" + avatar->second + ([_session avatarForMxc:avatar->second] ? "+" : "-");
+                state.Avatar = std::hash<std::string>{}(avatar->second);
+                state.HasImage = [_session avatarForMxc:avatar->second] != nil;
             }
         }
-        NSString* cacheKey = [[NSString alloc] initWithBytes:signature.data() length:signature.size() encoding:NSUTF8StringEncoding]
-            ?: @(keys.back().c_str());
-        NSAttributedString* item = _itemCache[cacheKey] ?: [self itemForMessage:message showSender:showSender showTime:showTime room:room];
-        cache[cacheKey] = item;
+        NSAttributedString* item = nil;
+        if (aligned && i >= shift && i - shift < _keys.size() && _keys[i - shift] == keys[i] && _itemStates[i - shift] == state) {
+            item = _items[i - shift];
+        } else {
+            item = [self itemForMessage:message showSender:state.ShowSender showTime:state.ShowTime room:room];
+        }
+        states.push_back(state);
         [items addObject:item];
     }
-    _itemCache = cache;
+    _itemStates = std::move(states);
 
     const CFAbsoluteTime built = CFAbsoluteTimeGetCurrent();
     const bool first = _keys.empty();
