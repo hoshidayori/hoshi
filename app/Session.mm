@@ -112,6 +112,8 @@ std::int64_t NowMs() {
     std::atomic<bool> _uploadingKeys;
     std::optional<NHoshi::NVerification::TVerification> _verificationCore;  // under _cryptoMutex
     std::uint64_t _verificationVersion;                                    // under _cryptoMutex
+    // Users' cross-signing keys from their latest /keys/query, for the master keys a verification covers
+    std::map<std::string, NHoshi::NE2ee::TCrossSigning> _crossSigning;    // under _cryptoMutex
     std::optional<NHoshi::NVerification::TVerification> _verification;      // main-queue copy
     std::uint64_t _verificationShown;                                      // main queue: the version of that copy
 
@@ -649,6 +651,22 @@ static NSURL* AvatarFile(const NHoshi::TMxc& mxc) {
     return {_machine->UserId(), _machine->DeviceId(), _machine->Account().FingerprintKey()};
 }
 
+// Runs with _cryptoMutex held
+- (void)rememberCrossSigningLocked:(const NHoshi::TJson&)queryResponse {
+    for (auto& [user, keys] : NHoshi::NE2ee::CrossSigningFromQuery(queryResponse)) {
+        _crossSigning[user] = std::move(keys);
+    }
+}
+
+// Runs with _cryptoMutex held: the master keys of both users, as far as /keys/query told us
+- (void)setMasterKeysLocked:(NHoshi::NVerification::TVerification&)verification {
+    const auto masterOf = [&](const std::string& user) {
+        const auto it = _crossSigning.find(user);
+        return it == _crossSigning.end() ? std::string() : it->second.Master;
+    };
+    verification.SetMasterKeys(masterOf(_machine->UserId()), masterOf(verification.Them().UserId));
+}
+
 static bool IsActive(const std::optional<NHoshi::NVerification::TVerification>& verification) {
     using NHoshi::NVerification::EState;
     return verification && verification->State() != EState::Done && verification->State() != EState::Cancelled;
@@ -667,9 +685,18 @@ static bool IsActive(const std::optional<NHoshi::NVerification::TVerification>& 
         }
         change(*_verificationCore);
         outgoing = _verificationCore->TakeOutgoing();
-        if (_verificationCore->State() == NHoshi::NVerification::EState::Done && !_machine->IsVerified(_verificationCore->Them())) {
-            _machine->MarkVerified(_verificationCore->Them());
-            SaveMachine(*_machine);
+        if (_verificationCore->State() == NHoshi::NVerification::EState::Done) {
+            const auto& them = _verificationCore->Them();
+            const std::string& master = _verificationCore->VerifiedMasterKey();
+            const bool newMaster = !master.empty() && !_machine->IsMasterKeyTrusted(them.UserId, master);
+            if (!_machine->IsVerified(them) || newMaster) {
+                _machine->MarkVerified(them);
+                if (newMaster) {
+                    // The other side's MAC covered its master key: the devices it cross-signs are trusted too
+                    _machine->TrustMasterKey(them.UserId, master);
+                }
+                SaveMachine(*_machine);
+            }
         }
         snapshot = _verificationCore;
         version = ++_verificationVersion;
@@ -729,10 +756,17 @@ static bool IsActive(const std::optional<NHoshi::NVerification::TVerification>& 
         }];
         return;
     }
-    // The keys the server has for the asking device: the verification checks them
+    // The keys the server has for the asking device: the verification checks them. Our own user's keys too, for
+    // our master key.
     std::optional<NHoshi::NE2ee::TDevice> them;
+    NHoshi::TJson keys;
     try {
-        for (const auto& device : NHoshi::NE2ee::DevicesFromQuery(_sync->Client->QueryKeys({sender}))) {
+        std::vector<std::string> users{sender};
+        if (sender != _sync->Client->UserId()) {
+            users.push_back(_sync->Client->UserId());
+        }
+        keys = _sync->Client->QueryKeys(users);
+        for (const auto& device : NHoshi::NE2ee::DevicesFromQuery(keys)) {
             if (device.UserId == sender && device.DeviceId == content.StringOr("from_device")) {
                 them = device;
             }
@@ -748,10 +782,12 @@ static bool IsActive(const std::optional<NHoshi::NVerification::TVerification>& 
         if (!_machine || IsActive(_verificationCore)) {
             return;  // one at a time; the other side times out
         }
+        [self rememberCrossSigningLocked:keys];
         auto request = NHoshi::NVerification::TVerification::FromRequest([self identityLocked], *them, content, NowMs());
         if (!request) {
             return;
         }
+        [self setMasterKeysLocked:*request];
         _verificationCore = std::move(request);
     }
     [self changeVerification:^(NHoshi::NVerification::TVerification&) {}];
@@ -772,6 +808,8 @@ static bool IsActive(const std::optional<NHoshi::NVerification::TVerification>& 
         }
         _verificationCore = NHoshi::NVerification::TVerification::Request([self identityLocked], device,
             NSUUID.UUID.UUIDString.UTF8String, NowMs());
+        // The device came from the devices screen, whose /keys/query filled the cache
+        [self setMasterKeysLocked:*_verificationCore];
     }
     [self sendVerificationMessages:std::move(cancel) to:previous];
     [self changeVerification:^(NHoshi::NVerification::TVerification&) {}];
@@ -811,13 +849,23 @@ static bool IsActive(const std::optional<NHoshi::NVerification::TVerification>& 
         std::vector<HSDevice> devices;
         NSString* error = nil;
         try {
-            const auto found = NHoshi::NE2ee::DevicesFromQuery(self->_send->Client->QueryKeys({user}));
+            std::vector<std::string> users{user};
+            if (user != self->_send->Client->UserId()) {
+                users.push_back(self->_send->Client->UserId());
+            }
+            const auto keys = self->_send->Client->QueryKeys(users);
+            const auto found = NHoshi::NE2ee::DevicesFromQuery(keys);
             std::lock_guard lock(self->_cryptoMutex);
+            [self rememberCrossSigningLocked:keys];
             for (const auto& device : found) {
-                if (self->_machine && device.UserId == self->_machine->UserId() && device.DeviceId == self->_machine->DeviceId()) {
+                if (device.UserId != user ||
+                    (self->_machine && device.UserId == self->_machine->UserId() && device.DeviceId == self->_machine->DeviceId()))
+                {
                     continue;
                 }
-                devices.push_back({device, self->_machine && self->_machine->IsVerified(device)});
+                const bool direct = self->_machine && self->_machine->IsVerified(device);
+                const bool trusted = self->_machine && self->_machine->IsTrusted(device);
+                devices.push_back({device, trusted, trusted && !direct});
             }
         } catch (const NHoshi::TMatrixError& e) {
             error = Describe(e);

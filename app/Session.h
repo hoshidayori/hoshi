@@ -20,7 +20,8 @@ extern NSNotificationName const HSSessionAvatarsDidChange;
 // A device from /keys/query and whether this device has verified it
 struct HSDevice {
     NHoshi::NE2ee::TDevice Device;
-    bool Verified = false;
+    bool Verified = false;      // directly or through cross-signing
+    bool CrossSigned = false;   // verified only through cross-signing under a master key our user verified
 };
 
 // Owns the Matrix client. All network calls run on serial queues, because TClient is not

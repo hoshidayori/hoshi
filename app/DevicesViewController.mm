@@ -88,7 +88,9 @@ NSString* Fingerprint(const std::string& key) {
     const HSDevice& device = _devices[static_cast<size_t>(indexPath.row)];
     UIListContentConfiguration* content = UIListContentConfiguration.subtitleCellConfiguration;
     content.text = ToNs(device.Device.DeviceId);
-    content.secondaryText = Fingerprint(device.Device.Ed25519);
+    content.secondaryText = device.CrossSigned
+        ? [Fingerprint(device.Device.Ed25519) stringByAppendingString:@"\nVerified through cross-signing"]
+        : Fingerprint(device.Device.Ed25519);
     content.secondaryTextProperties.font = [UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular];
     content.image = [UIImage systemImageNamed:device.Verified ? @"checkmark.shield.fill" : @"exclamationmark.shield"];
     content.imageProperties.tintColor = device.Verified ? UIColor.systemGreenColor : UIColor.systemOrangeColor;
