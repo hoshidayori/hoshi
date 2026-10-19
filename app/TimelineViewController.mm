@@ -48,18 +48,44 @@ UIFont* StyledFont(UIFont* base, unsigned style) {
     return [UIFont fontWithDescriptor:descriptor size:size];
 }
 
-// The text of a formatted body. Its line breaks are line separators, so the message stays one paragraph with
-// one bubble, as a plain body does; the copy turns them into newlines.
-NSAttributedString* FormattedText(const std::string& html, NSDictionary<NSAttributedStringKey, id>* base) {
+// The text of a formatted body. Its line breaks are line separators, so the message stays one paragraph, as a
+// plain body does; the copy turns them into newlines. Only a code block is a paragraph of its own, between
+// paragraph breaks, so that its lines can stay unwrapped. The code blocks are named by the message key and
+// their number.
+NSAttributedString* FormattedText(const std::string& html, NSDictionary<NSAttributedStringKey, id>* base, NSString* key) {
     using namespace NHoshi::NHtml;
     NSMutableAttributedString* text = [[NSMutableAttributedString alloc] init];
     UIFont* font = base[NSFontAttributeName];
-    for (const auto& run : Parse(html)) {
-        NSString* string = [ToNs(run.Text) stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    const auto runs = Parse(html);
+    HSCodeBlock* block = nil;
+    int blocks = 0;
+    for (size_t i = 0; i < runs.size(); ++i) {
+        const auto& run = runs[i];
+        // A line break between code and something else is a paragraph break; inside a block or outside it,
+        // a line separator
+        const bool code = run.Style & CodeBlock;
+        NSMutableString* string = [ToNs(run.Text) mutableCopy];
+        const bool nextCode = i + 1 < runs.size() && (runs[i + 1].Style & CodeBlock);
+        const bool prevCode = i > 0 && (runs[i - 1].Style & CodeBlock);
+        if (code && !prevCode) {
+            block = [[HSCodeBlock alloc] initWithIdentifier:[NSString stringWithFormat:@"%@#%d", key, blocks++]];
+            // For screenshots of a scrolled block: the simulator cannot drag (-HSCodeOffset 200)
+            block.offset = [NSUserDefaults.standardUserDefaults doubleForKey:@"HSCodeOffset"];
+        }
+        [string replaceOccurrencesOfString:@"\n" withString:@" " options:0 range:NSMakeRange(0, string.length)];
+        if (!code && prevCode && [string hasPrefix:@" "]) {
+            [string replaceCharactersInRange:NSMakeRange(0, 1) withString:@"\n"];
+        }
+        if (!code && nextCode && [string hasSuffix:@" "]) {
+            [string replaceCharactersInRange:NSMakeRange(string.length - 1, 1) withString:@"\n"];
+        }
+        if (code && !nextCode && [string hasSuffix:@" "]) {
+            [string replaceCharactersInRange:NSMakeRange(string.length - 1, 1) withString:@"\n"];
+        }
         NSMutableDictionary<NSAttributedStringKey, id>* attributes = [base mutableCopy];
         attributes[NSFontAttributeName] = StyledFont(font, run.Style);
-        if (run.Style & CodeBlock) {
-            attributes[HSCodeBlockAttribute] = @YES;  // the fragment draws the block's box
+        if (code) {
+            attributes[HSCodeBlockAttribute] = block;  // the fragment draws the block's box and scrolls it
         } else if (run.Style & Code) {
             attributes[NSBackgroundColorAttributeName] = UIColor.tertiarySystemFillColor;
         }
@@ -448,13 +474,38 @@ static const CGFloat MaxInputLines = 6;
         HSMessageMetaAttribute: meta,
     };
     NSAttributedString* formatted = !meta.waitingForKey && !message.FormattedBody.empty()
-        ? FormattedText(message.FormattedBody, attributes) : nil;
-    if (formatted.length > 0) {
-        [item appendAttributedString:formatted];
-        [item appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:attributes]];
-    } else {
-        [item appendAttributedString:[[NSAttributedString alloc] initWithString:[body stringByAppendingString:@"\n"] attributes:attributes]];
+        ? FormattedText(message.FormattedBody, attributes, ToNs(KeyOf(message))) : nil;
+    NSMutableAttributedString* text = formatted.length > 0 ? [formatted mutableCopy]
+        : [[NSMutableAttributedString alloc] initWithString:body attributes:attributes];
+    [text appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:attributes]];
+
+    // Each paragraph of the body is a part of one bubble; a code block's lines do not wrap
+    std::vector<NSRange> paragraphs;
+    for (NSUInteger at = 0; at < text.length;) {
+        const NSRange paragraph = [text.string paragraphRangeForRange:NSMakeRange(at, 0)];
+        paragraphs.push_back(paragraph);
+        at = NSMaxRange(paragraph);
     }
+    for (size_t i = 0; i < paragraphs.size(); ++i) {
+        HSMessageMeta* part = [[HSMessageMeta alloc] init];
+        part.time = meta.time;
+        part.txnId = meta.txnId;
+        part.waitingForKey = meta.waitingForKey;
+        part.status = meta.status;
+        part.part = paragraphs.size() == 1 ? HSBubblePartOnly
+            : i == 0 ? HSBubblePartFirst
+            : i + 1 == paragraphs.size() ? HSBubblePartLast
+            : HSBubblePartMiddle;
+        NSMutableParagraphStyle* paragraphStyle = [style mutableCopy];
+        if (i > 0) {
+            paragraphStyle.paragraphSpacingBefore = 8;  // around a code block, inside the bubble
+        }
+        if ([text attribute:HSCodeBlockAttribute atIndex:paragraphs[i].location effectiveRange:nullptr]) {
+            paragraphStyle.lineBreakMode = NSLineBreakByClipping;
+        }
+        [text addAttributes:@{HSMessageMetaAttribute: part, NSParagraphStyleAttributeName: paragraphStyle} range:paragraphs[i]];
+    }
+    [item appendAttributedString:text];
     return item;
 }
 

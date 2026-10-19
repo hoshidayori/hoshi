@@ -1,5 +1,7 @@
 #import "TimelineText.h"
 
+#include <cmath>
+
 NSAttributedStringKey const HSMessageMetaAttribute = @"HSMessageMeta";
 NSAttributedStringKey const HSSenderMetaAttribute = @"HSSenderMeta";
 NSAttributedStringKey const HSCodeBlockAttribute = @"HSCodeBlock";
@@ -19,11 +21,30 @@ const CGFloat HSBubblePadY = 7;
     }
     HSMessageMeta* meta = other;
     return [meta.time isEqualToString:_time] && meta.status == _status && meta.waitingForKey == _waitingForKey &&
-        [meta.txnId isEqualToString:_txnId];
+        [meta.txnId isEqualToString:_txnId] && meta.part == _part;
 }
 
 - (NSUInteger)hash {
-    return _time.hash ^ static_cast<NSUInteger>(_status) ^ _txnId.hash;
+    return _time.hash ^ static_cast<NSUInteger>(_status) ^ _txnId.hash ^ (static_cast<NSUInteger>(_part) << 4);
+}
+
+@end
+
+@implementation HSCodeBlock
+
+- (instancetype)initWithIdentifier:(NSString*)identifier {
+    if ((self = [super init])) {
+        _identifier = [identifier copy];
+    }
+    return self;
+}
+
+- (BOOL)isEqual:(id)other {
+    return [other isKindOfClass:[HSCodeBlock class]] && [((HSCodeBlock*)other).identifier isEqualToString:_identifier];
+}
+
+- (NSUInteger)hash {
+    return _identifier.hash;
 }
 
 @end
@@ -67,8 +88,16 @@ UIFont* TimeFont() {
     return [paragraph.attributedString attribute:HSMessageMetaAttribute atIndex:0 effectiveRange:nullptr];
 }
 
-// Hugs the text: as wide as its longest line
-- (CGRect)bubbleRect {
+- (nullable HSCodeBlock*)codeBlock {
+    NSTextParagraph* paragraph = [self.textElement isKindOfClass:[NSTextParagraph class]] ? (NSTextParagraph*)self.textElement : nil;
+    if (paragraph.attributedString.length == 0) {
+        return nil;
+    }
+    return [paragraph.attributedString attribute:HSCodeBlockAttribute atIndex:0 effectiveRange:nullptr];
+}
+
+// The lines' text, without the empty line break at the end
+- (CGRect)textRect {
     CGRect text = CGRectNull;
     for (NSTextLineFragment* line in self.textLineFragments) {
         CGRect bounds = line.typographicBounds;
@@ -76,10 +105,46 @@ UIFont* TimeFont() {
             text = CGRectUnion(text, bounds);
         }
     }
-    if (CGRectIsNull(text)) {
+    return text;
+}
+
+// A message of one paragraph hugs its text: as wide as its longest line. A message of several paragraphs takes
+// the whole width, so its parts line up; each part reaches the edge of its fragment where the next one goes on.
+- (CGRect)bubbleRect {
+    HSMessageMeta* meta = [self meta];
+    const CGRect text = [self textRect];
+    if (!meta || CGRectIsNull(text)) {
         return CGRectNull;
     }
-    return CGRectInset(text, -HSBubblePadX, -HSBubblePadY);
+    if (meta.part == HSBubblePartOnly) {
+        return CGRectInset(text, -HSBubblePadX, -HSBubblePadY);
+    }
+    const CGFloat left = CGRectGetMinX(text) - HSBubblePadX;
+    const CGFloat right = self.textLayoutManager.textContainer.size.width - HSBubbleSide - self.layoutFragmentFrame.origin.x;
+    const CGFloat top = meta.part == HSBubblePartFirst ? CGRectGetMinY(text) - HSBubblePadY : 0;
+    const CGFloat bottom = meta.part == HSBubblePartLast ? CGRectGetMaxY(text) + HSBubblePadY : self.layoutFragmentFrame.size.height;
+    return CGRectMake(left, top, right - left, bottom - top);
+}
+
+// The width of the longest line as set, unwrapped. The line fragments of a clipped paragraph report their
+// bounds cut at the container's edge, so the width comes from the line's text itself.
+- (CGFloat)widestLine {
+    CGFloat widest = 0;
+    for (NSTextLineFragment* line in self.textLineFragments) {
+        const NSRange range = line.characterRange;
+        if (range.length == 0 || NSMaxRange(range) > line.attributedString.length) {
+            continue;
+        }
+        widest = MAX(widest, [[line.attributedString attributedSubstringFromRange:range] size].width);
+    }
+    return widest;
+}
+
+// The box of a code block, in the bubble's text width
+- (CGRect)codeBoxInBubble:(CGRect)bubble {
+    const CGRect text = [self textRect];
+    return CGRectMake(CGRectGetMinX(bubble) + HSBubblePadX - 6, CGRectGetMinY(text) - 4,
+        CGRectGetWidth(bubble) - 2 * HSBubblePadX + 12, CGRectGetHeight(text) + 8);
 }
 
 - (nullable HSSenderMeta*)senderMeta {
@@ -151,32 +216,6 @@ UIFont* TimeFont() {
     UIGraphicsPopContext();
 }
 
-// One box behind each run of consecutive code block lines, across the bubble's text width
-- (void)drawCodeBlocksInBubble:(CGRect)bubble atPoint:(CGPoint)point traits:(UITraitCollection*)traits {
-    CGRect block = CGRectNull;
-    const auto fill = [&] {
-        if (CGRectIsNull(block)) {
-            return;
-        }
-        const CGRect box = CGRectMake(CGRectGetMinX(bubble) + HSBubblePadX - 6, CGRectGetMinY(block) - 3,
-            CGRectGetWidth(bubble) - 2 * HSBubblePadX + 12, CGRectGetHeight(block) + 6);
-        [[[UIColor.labelColor resolvedColorWithTraitCollection:traits] colorWithAlphaComponent:0.07] setFill];
-        [[UIBezierPath bezierPathWithRoundedRect:box cornerRadius:6] fill];
-        block = CGRectNull;
-    };
-    for (NSTextLineFragment* line in self.textLineFragments) {
-        const NSRange range = line.characterRange;
-        const BOOL code = range.length > 0 && range.location < line.attributedString.length &&
-            [line.attributedString attribute:HSCodeBlockAttribute atIndex:range.location effectiveRange:nullptr] != nil;
-        if (code) {
-            block = CGRectUnion(block, CGRectOffset(line.typographicBounds, point.x, point.y));
-        } else {
-            fill();
-        }
-    }
-    fill();
-}
-
 - (void)drawAtPoint:(CGPoint)point inContext:(CGContextRef)context {
     if (HSSenderMeta* sender = [self senderMeta]) {
         [self drawAvatar:sender atPoint:point inContext:context];
@@ -189,11 +228,41 @@ UIFont* TimeFont() {
         UITraitCollection* traits = UITraitCollection.currentTraitCollection;
         // Translucent: the selection highlight lies under the text layer, and must show through the bubble
         [[[UIColor.labelColor resolvedColorWithTraitCollection:traits] colorWithAlphaComponent:0.06] setFill];
-        [[UIBezierPath bezierPathWithRoundedRect:bubble cornerRadius:12] fill];
-        [self drawCodeBlocksInBubble:bubble atPoint:point traits:traits];
+        const UIRectCorner corners = meta.part == HSBubblePartOnly ? UIRectCornerAllCorners
+            : meta.part == HSBubblePartFirst ? (UIRectCornerTopLeft | UIRectCornerTopRight)
+            : meta.part == HSBubblePartLast ? (UIRectCornerBottomLeft | UIRectCornerBottomRight)
+            : 0;
+        [[UIBezierPath bezierPathWithRoundedRect:bubble byRoundingCorners:corners cornerRadii:CGSizeMake(12, 12)] fill];
 
-        // In the column left of the bubble, against it, on its last line: the time, or instead the state of a
-        // message sent from this device or still waiting for its key
+        HSCodeBlock* block = [self codeBlock];
+        CGRect box = CGRectNull;
+        if (block) {
+            box = [self codeBoxInBubble:bubble];
+            [[[UIColor.labelColor resolvedColorWithTraitCollection:traits] colorWithAlphaComponent:0.07] setFill];
+            [[UIBezierPath bezierPathWithRoundedRect:box cornerRadius:6] fill];
+            // The lines do not wrap: what is wider than the box is reached by scrolling it sideways
+            block.maxOffset = MAX(0, [self widestLine] - (CGRectGetWidth(box) - 12));
+            block.offset = MIN(MAX(block.offset, 0), block.maxOffset);
+        }
+        if (meta.part == HSBubblePartOnly || meta.part == HSBubblePartLast) {
+            [self drawTimeOf:meta rightOf:bubble traits:traits];
+        }
+        UIGraphicsPopContext();
+        if (block) {
+            CGContextSaveGState(context);
+            CGContextClipToRect(context, CGRectInset(box, 2, 0));
+            [super drawAtPoint:CGPointMake(point.x - block.offset, point.y) inContext:context];
+            CGContextRestoreGState(context);
+            return;
+        }
+    }
+    [super drawAtPoint:point inContext:context];
+}
+
+// In the column left of the bubble, against it, on its last line: the time, or instead the state of a message
+// sent from this device or still waiting for its key
+- (void)drawTimeOf:(HSMessageMeta*)meta rightOf:(CGRect)bubble traits:(UITraitCollection*)traits {
+    {
         UIFont* font = TimeFont();
         const CGFloat right = CGRectGetMinX(bubble) - 5;
         const CGFloat baselineY = CGRectGetMaxY(bubble) - HSBubblePadY;
@@ -213,9 +282,7 @@ UIFont* TimeFont() {
             const CGFloat width = [meta.time sizeWithAttributes:attributes].width;
             [meta.time drawAtPoint:CGPointMake(right - width, baselineY - font.ascender) withAttributes:attributes];
         }
-        UIGraphicsPopContext();
     }
-    [super drawAtPoint:point inContext:context];
 }
 
 @end
@@ -235,10 +302,15 @@ UIFont* TimeFont() {
 - (BOOL)isVertical { return NO; }
 @end
 
-@interface HSTimelineTextView () <NSTextLayoutManagerDelegate>
+@interface HSTimelineTextView () <NSTextLayoutManagerDelegate, UIGestureRecognizerDelegate>
 @end
 
-@implementation HSTimelineTextView
+@implementation HSTimelineTextView {
+    UIPanGestureRecognizer* _codePan;
+    HSCodeBlock* _scrolledBlock;    // the block a sideways drag moves
+    CGFloat _scrolledBlockStart;    // its offset when the drag began
+    NSTextRange* _scrolledRange;    // its paragraph, to lay out again
+}
 
 - (instancetype)init {
     // TextKit 2: the custom layout fragments draw the bubbles, and layout stays near the visible part
@@ -249,8 +321,61 @@ UIFont* TimeFont() {
         self.textContainerInset = UIEdgeInsetsMake(12, 0, 12, 0);
         self.textContainer.lineFragmentPadding = 0;
         self.textLayoutManager.delegate = self;
+        // A sideways drag on a code block that does not fit scrolls the block; the timeline scrolls only once
+        // that gesture gave up
+        _codePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(scrollCodeBlock:)];
+        _codePan.delegate = self;
+        [self addGestureRecognizer:_codePan];
+        [self.panGestureRecognizer requireGestureRecognizerToFail:_codePan];
     }
     return self;
+}
+
+// The fragment of the code block at a point of the view, if the block is wider than its box
+- (nullable HSMessageLayoutFragment*)scrollableCodeFragmentAtPoint:(CGPoint)point {
+    const CGPoint inContainer = CGPointMake(point.x - self.textContainerInset.left, point.y - self.textContainerInset.top);
+    NSTextLayoutFragment* fragment = [self.textLayoutManager textLayoutFragmentForPosition:inContainer];
+    if (![fragment isKindOfClass:[HSMessageLayoutFragment class]]) {
+        return nil;
+    }
+    HSMessageLayoutFragment* message = (HSMessageLayoutFragment*)fragment;
+    HSCodeBlock* block = [message codeBlock];
+    return block && block.maxOffset > 0 ? message : nil;
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer*)recognizer {
+    if (recognizer != _codePan) {
+        return [super gestureRecognizerShouldBegin:recognizer];
+    }
+    const CGPoint velocity = [_codePan velocityInView:self];
+    if (std::abs(velocity.x) <= std::abs(velocity.y)) {
+        return NO;
+    }
+    HSMessageLayoutFragment* fragment = [self scrollableCodeFragmentAtPoint:[_codePan locationInView:self]];
+    if (!fragment) {
+        return NO;
+    }
+    _scrolledBlock = [fragment codeBlock];
+    _scrolledBlockStart = _scrolledBlock.offset;
+    _scrolledRange = fragment.rangeInElement;
+    return YES;
+}
+
+- (void)scrollCodeBlock:(UIPanGestureRecognizer*)pan {
+    if (!_scrolledBlock || (pan.state != UIGestureRecognizerStateChanged && pan.state != UIGestureRecognizerStateEnded)) {
+        return;
+    }
+    const CGFloat offset = MIN(MAX(_scrolledBlockStart - [pan translationInView:self].x, 0), _scrolledBlock.maxOffset);
+    if (offset != _scrolledBlock.offset) {
+        _scrolledBlock.offset = offset;
+        // The fragment draws with the new offset once it is laid out again; only this paragraph is
+        [self.textLayoutManager invalidateLayoutForRange:_scrolledRange];
+        [self.textLayoutManager.textViewportLayoutController layoutViewport];
+    }
+    if (pan.state == UIGestureRecognizerStateEnded) {
+        _scrolledBlock = nil;
+        _scrolledRange = nil;
+    }
 }
 
 - (NSTextLayoutFragment*)textLayoutManager:(NSTextLayoutManager*)textLayoutManager
@@ -288,12 +413,31 @@ UIFont* TimeFont() {
     const UIEdgeInsets inset = self.textContainerInset;
     [self.textLayoutManager enumerateTextSegmentsInRange:textRange type:NSTextLayoutManagerSegmentTypeStandard
         options:NSTextLayoutManagerSegmentOptionsNone
-        usingBlock:^BOOL(NSTextRange*, CGRect frame, CGFloat, NSTextContainer*) {
+        usingBlock:^BOOL(NSTextRange* segment, CGRect frame, CGFloat, NSTextContainer*) {
             if (frame.size.width < 1) {
                 return YES;  // the line break at a paragraph's end: nothing to show
             }
+            // In a scrolled code block the text is drawn shifted, and so is its selection, cut at the box
+            CGRect line = CGRectOffset(frame, inset.left, inset.top);
+            if (segment) {
+                NSTextLayoutFragment* fragment = [self.textLayoutManager textLayoutFragmentForLocation:segment.location];
+                if ([fragment isKindOfClass:[HSMessageLayoutFragment class]]) {
+                    HSMessageLayoutFragment* message = (HSMessageLayoutFragment*)fragment;
+                    if (HSCodeBlock* block = [message codeBlock]) {
+                        line = CGRectOffset(line, -block.offset, 0);
+                        CGRect box = [message codeBoxInBubble:[message bubbleRect]];
+                        box = CGRectOffset(box, fragment.layoutFragmentFrame.origin.x + inset.left,
+                            fragment.layoutFragmentFrame.origin.y + inset.top);
+                        line.origin.x = MAX(line.origin.x, CGRectGetMinX(box));
+                        line.size.width = MIN(CGRectGetMaxX(line), CGRectGetMaxX(box)) - line.origin.x;
+                        if (line.size.width < 1) {
+                            return YES;  // scrolled out of the box
+                        }
+                    }
+                }
+            }
             HSSelectionRect* rect = [[HSSelectionRect alloc] init];
-            rect.lineRect = CGRectOffset(frame, inset.left, inset.top);
+            rect.lineRect = line;
             [rects addObject:rect];
             return YES;
         }];
@@ -303,6 +447,32 @@ UIFont* TimeFont() {
     rects.firstObject.start = YES;
     rects.lastObject.end = YES;
     return rects;
+}
+
+// How far the code block at a point of the view is scrolled; 0 elsewhere
+- (CGFloat)codeOffsetAtPoint:(CGPoint)point {
+    const CGPoint inContainer = CGPointMake(point.x - self.textContainerInset.left, point.y - self.textContainerInset.top);
+    NSTextLayoutFragment* fragment = [self.textLayoutManager textLayoutFragmentForPosition:inContainer];
+    if (![fragment isKindOfClass:[HSMessageLayoutFragment class]]) {
+        return 0;
+    }
+    HSCodeBlock* block = [(HSMessageLayoutFragment*)fragment codeBlock];
+    return block ? block.offset : 0;
+}
+
+// A touch in a scrolled code block means the character drawn under it, which the layout has further right
+- (UITextPosition*)closestPositionToPoint:(CGPoint)point {
+    return [super closestPositionToPoint:CGPointMake(point.x + [self codeOffsetAtPoint:point], point.y)];
+}
+
+- (UITextPosition*)closestPositionToPoint:(CGPoint)point withinRange:(UITextRange*)range {
+    return [super closestPositionToPoint:CGPointMake(point.x + [self codeOffsetAtPoint:point], point.y) withinRange:range];
+}
+
+- (CGRect)caretRectForPosition:(UITextPosition*)position {
+    CGRect caret = [super caretRectForPosition:position];
+    const CGPoint middle = CGPointMake(CGRectGetMidX(caret), CGRectGetMidY(caret));
+    return CGRectOffset(caret, -[self codeOffsetAtPoint:middle], 0);
 }
 
 - (nullable NSString*)failedTxnIdAtPoint:(CGPoint)point {

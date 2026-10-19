@@ -15,12 +15,22 @@ typedef NS_ENUM(NSInteger, HSMessageStatus) {
     HSMessageStatusFailed,
 };
 
-// What the fragment draws around a message body; set as the HSMessageMetaAttribute of the body paragraph
+// Which part of its message's bubble a body paragraph is. A message is one paragraph, unless it has code
+// blocks: each block is a paragraph of its own, whose lines do not wrap and scroll sideways.
+typedef NS_ENUM(NSInteger, HSBubblePart) {
+    HSBubblePartOnly,
+    HSBubblePartFirst,
+    HSBubblePartMiddle,
+    HSBubblePartLast,
+};
+
+// What the fragment draws around a message body; set as the HSMessageMetaAttribute of each body paragraph
 @interface HSMessageMeta : NSObject
 @property (nonatomic, copy) NSString* time;
 @property (nonatomic) HSMessageStatus status;
 @property (nonatomic) BOOL waitingForKey;
 @property (nonatomic, copy) NSString* txnId;  // for a retry of a failed message
+@property (nonatomic) HSBubblePart part;
 @end
 
 extern NSAttributedStringKey const HSMessageMetaAttribute;
@@ -36,8 +46,16 @@ extern NSAttributedStringKey const HSMessageMetaAttribute;
 
 extern NSAttributedStringKey const HSSenderMetaAttribute;
 
-// Marks the lines of a code block in a message body: the fragment draws one box behind them, as wide as the
-// bubble's text, instead of a background behind each line's characters
+// A code block: a paragraph whose lines do not wrap. The fragment draws a box behind it, as wide as the bubble's
+// text, and the text inside shifted by the block's offset, which a sideways drag changes.
+@interface HSCodeBlock : NSObject
+- (instancetype)initWithIdentifier:(NSString*)identifier;
+@property (nonatomic, readonly, copy) NSString* identifier;  // equal blocks keep an unchanged message's text
+@property (nonatomic) CGFloat offset;     // how far the text is scrolled to the left
+@property (nonatomic) CGFloat maxOffset;  // set when the block is drawn: how much of it does not fit
+@end
+
+// Set on the characters of a code block paragraph
 extern NSAttributedStringKey const HSCodeBlockAttribute;
 
 // Geometry shared by the paragraph styles and the drawing
