@@ -58,7 +58,9 @@ NSAttributedString* FormattedText(const std::string& html, NSDictionary<NSAttrib
         NSString* string = [ToNs(run.Text) stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
         NSMutableDictionary<NSAttributedStringKey, id>* attributes = [base mutableCopy];
         attributes[NSFontAttributeName] = StyledFont(font, run.Style);
-        if (run.Style & (Code | CodeBlock)) {
+        if (run.Style & CodeBlock) {
+            attributes[HSCodeBlockAttribute] = @YES;  // the fragment draws the block's box
+        } else if (run.Style & Code) {
             attributes[NSBackgroundColorAttributeName] = UIColor.tertiarySystemFillColor;
         }
         if (run.Style & Underline) {

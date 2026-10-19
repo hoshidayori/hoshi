@@ -2,6 +2,7 @@
 
 NSAttributedStringKey const HSMessageMetaAttribute = @"HSMessageMeta";
 NSAttributedStringKey const HSSenderMetaAttribute = @"HSSenderMeta";
+NSAttributedStringKey const HSCodeBlockAttribute = @"HSCodeBlock";
 
 const CGFloat HSBubbleSide = 12;
 const CGFloat HSAvatarSize = 30;
@@ -150,6 +151,32 @@ UIFont* TimeFont() {
     UIGraphicsPopContext();
 }
 
+// One box behind each run of consecutive code block lines, across the bubble's text width
+- (void)drawCodeBlocksInBubble:(CGRect)bubble atPoint:(CGPoint)point traits:(UITraitCollection*)traits {
+    CGRect block = CGRectNull;
+    const auto fill = [&] {
+        if (CGRectIsNull(block)) {
+            return;
+        }
+        const CGRect box = CGRectMake(CGRectGetMinX(bubble) + HSBubblePadX - 6, CGRectGetMinY(block) - 3,
+            CGRectGetWidth(bubble) - 2 * HSBubblePadX + 12, CGRectGetHeight(block) + 6);
+        [[[UIColor.labelColor resolvedColorWithTraitCollection:traits] colorWithAlphaComponent:0.07] setFill];
+        [[UIBezierPath bezierPathWithRoundedRect:box cornerRadius:6] fill];
+        block = CGRectNull;
+    };
+    for (NSTextLineFragment* line in self.textLineFragments) {
+        const NSRange range = line.characterRange;
+        const BOOL code = range.length > 0 && range.location < line.attributedString.length &&
+            [line.attributedString attribute:HSCodeBlockAttribute atIndex:range.location effectiveRange:nullptr] != nil;
+        if (code) {
+            block = CGRectUnion(block, CGRectOffset(line.typographicBounds, point.x, point.y));
+        } else {
+            fill();
+        }
+    }
+    fill();
+}
+
 - (void)drawAtPoint:(CGPoint)point inContext:(CGContextRef)context {
     if (HSSenderMeta* sender = [self senderMeta]) {
         [self drawAvatar:sender atPoint:point inContext:context];
@@ -163,6 +190,7 @@ UIFont* TimeFont() {
         // Translucent: the selection highlight lies under the text layer, and must show through the bubble
         [[[UIColor.labelColor resolvedColorWithTraitCollection:traits] colorWithAlphaComponent:0.06] setFill];
         [[UIBezierPath bezierPathWithRoundedRect:bubble cornerRadius:12] fill];
+        [self drawCodeBlocksInBubble:bubble atPoint:point traits:traits];
 
         // In the column left of the bubble, against it, on its last line: the time, or instead the state of a
         // message sent from this device or still waiting for its key

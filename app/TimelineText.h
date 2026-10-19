@@ -36,6 +36,10 @@ extern NSAttributedStringKey const HSMessageMetaAttribute;
 
 extern NSAttributedStringKey const HSSenderMetaAttribute;
 
+// Marks the lines of a code block in a message body: the fragment draws one box behind them, as wide as the
+// bubble's text, instead of a background behind each line's characters
+extern NSAttributedStringKey const HSCodeBlockAttribute;
+
 // Geometry shared by the paragraph styles and the drawing
 extern const CGFloat HSBubbleSide;     // from the screen edges to the avatar and to the widest bubble
 extern const CGFloat HSAvatarSize;
