@@ -59,6 +59,10 @@ public:
     static TVerification Request(const TIdentity& us, const NE2ee::TDevice& them, std::string transactionId,
         std::int64_t nowMs);
 
+    // The cross-signing master keys of both users, from /keys/query, if they have them. Our MAC then covers our
+    // master key, so the other side can trust it, and theirs is checked if their MAC covers it.
+    void SetMasterKeys(std::string ours, std::string theirs);
+
     void Receive(const std::string& type, const TJson& content, const std::string& sender);
     void AcceptRequest();  // Requested -> Ready
     void StartSas();       // Ready -> WaitingForAccept
@@ -77,6 +81,8 @@ public:
     // When Cancelled: the m.key.verification.cancel code, ours or theirs
     const std::string& CancelCode() const { return CancelCode_; }
     const std::string& CancelReason() const { return CancelReason_; }
+    // Their master key, when their MAC covered it and was right; empty otherwise. Meaningful once Done.
+    const std::string& VerifiedMasterKey() const { return VerifiedMasterKey_; }
 
 private:
     TVerification(const TIdentity& us, const NE2ee::TDevice& them, std::string transactionId, EState state);
@@ -109,6 +115,9 @@ private:
     std::optional<TJson> TheirMac;
     std::string CancelCode_;
     std::string CancelReason_;
+    std::string OurMasterKey;
+    std::string TheirMasterKey;
+    std::string VerifiedMasterKey_;
 };
 
 } // namespace NHoshi::NVerification

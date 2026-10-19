@@ -102,6 +102,68 @@ void Verified(bool requesterStarts) {
     b->ConfirmSas();
     Pump(a, alice, *b, bob);
     Expect(a.State() == EState::Done && b->State() == EState::Done, "both verified");
+    Expect(a.VerifiedMasterKey().empty() && b->VerifiedMasterKey().empty(), "no master keys without cross-signing");
+}
+
+// Both users have cross-signing master keys: each MAC covers its master key. ourMaster is what Bob's side puts
+// in its MAC, theirMaster what Alice's side expects; tamper may change the MACs on the way.
+struct TMasterResult {
+    EState Alice;
+    std::string AliceVerifiedMaster;
+    std::string AliceCancelReason;
+};
+TMasterResult VerifyWithMasterKeys(const std::string& bobSends, const std::string& aliceExpects, const TTamper& tamper = {}) {
+    TSide alice("@alice:x", "PHONE");
+    TSide bob("@bob:x", "LAPTOP");
+    TVerification a = TVerification::Request(alice.Identity, bob.Device, "master", Now);
+    auto b = Handshake(a, alice, bob);
+    a.SetMasterKeys("alice-master", aliceExpects);
+    b->SetMasterKeys(bobSends, "alice-master");
+    Pump(a, alice, *b, bob);
+    a.StartSas();
+    Pump(a, alice, *b, bob);
+    b->ConfirmSas();
+    Pump(a, alice, *b, bob, tamper);
+    a.ConfirmSas();
+    Pump(a, alice, *b, bob, tamper);
+    Expect(tamper || b->VerifiedMasterKey() == "alice-master", "Bob verified Alice's master key");
+    return {a.State(), a.VerifiedMasterKey(), a.CancelReason()};
+}
+
+void MasterKeys() {
+    const auto both = VerifyWithMasterKeys("bob-master", "bob-master");
+    Expect(both.Alice == EState::Done && both.AliceVerifiedMaster == "bob-master", "Alice verified Bob's master key");
+
+    // Bob's MAC covers a master key Alice does not have for him: it proves nothing, the device is still verified
+    const auto unknown = VerifyWithMasterKeys("other-master", "bob-master");
+    Expect(unknown.Alice == EState::Done && unknown.AliceVerifiedMaster.empty(), "an unknown master key is not verified");
+
+    // Someone changes the MAC of the master key on the way
+    const auto tampered = VerifyWithMasterKeys("bob-master", "bob-master", [](const std::string& type, TJson& content) {
+        if (type != "m.key.verification.mac" || !content["mac"]["ed25519:bob-master"].IsString()) {
+            return;
+        }
+        TJson::TObject macs = content["mac"].AsObject();
+        macs["ed25519:bob-master"] = macs.at("ed25519:LAPTOP");
+        TJson::TObject changed = content.AsObject();
+        changed["mac"] = TJson(std::move(macs));
+        content = TJson(std::move(changed));
+    });
+    Expect(tampered.Alice == EState::Cancelled && tampered.AliceCancelReason == "The master key does not match",
+        "a wrong MAC of the master key cancels");
+
+    // Someone drops the master key from the MAC: the key list no longer matches
+    const auto dropped = VerifyWithMasterKeys("bob-master", "bob-master", [](const std::string& type, TJson& content) {
+        if (type != "m.key.verification.mac" || !content["mac"]["ed25519:bob-master"].IsString()) {
+            return;
+        }
+        TJson::TObject macs = content["mac"].AsObject();
+        macs.erase("ed25519:bob-master");
+        TJson::TObject changed = content.AsObject();
+        changed["mac"] = TJson(std::move(macs));
+        content = TJson(std::move(changed));
+    });
+    Expect(dropped.Alice == EState::Cancelled && dropped.AliceVerifiedMaster.empty(), "a dropped master key cancels");
 }
 
 } // namespace
@@ -109,6 +171,7 @@ void Verified(bool requesterStarts) {
 int main() {
     Verified(true);
     Verified(false);
+    MasterKeys();
 
     TSide alice("@alice:x", "PHONE");
     TSide bob("@bob:x", "LAPTOP");

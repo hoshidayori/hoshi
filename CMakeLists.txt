@@ -118,6 +118,11 @@ target_link_libraries(e2ee_test PRIVATE hoshi_crypto hoshi_core)
 target_compile_options(e2ee_test PRIVATE -Wall -Wextra -Werror)
 add_test(NAME e2ee_test COMMAND e2ee_test)
 
+add_executable(cross_signing_test core/cross_signing_test.cpp)
+target_link_libraries(cross_signing_test PRIVATE hoshi_crypto hoshi_core)
+target_compile_options(cross_signing_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME cross_signing_test COMMAND cross_signing_test)
+
 # Driven by interop/olm_interop.py
 add_executable(olm_tool core/olm_tool.cpp)
 target_link_libraries(olm_tool PRIVATE hoshi_crypto)
@@ -174,3 +179,9 @@ target_link_libraries(e2ee_e2e_test PRIVATE hoshi_crypto hoshi_core)
 target_compile_options(e2ee_e2e_test PRIVATE -Wall -Wextra -Werror)
 add_test(NAME e2ee_e2e_test COMMAND e2ee_e2e_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/synapse/data)
 set_tests_properties(e2ee_e2e_test PROPERTIES LABELS synapse)
+
+add_executable(cross_signing_e2e_test core/cross_signing_e2e_test.cpp)
+target_link_libraries(cross_signing_e2e_test PRIVATE hoshi_crypto hoshi_core)
+target_compile_options(cross_signing_e2e_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME cross_signing_e2e_test COMMAND cross_signing_e2e_test WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/synapse/data)
+set_tests_properties(cross_signing_e2e_test PROPERTIES LABELS synapse)

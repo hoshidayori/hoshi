@@ -18,7 +18,53 @@ std::string DeviceKeyName(const char* algorithm, const std::string& deviceId) {
     return std::string(algorithm) + ":" + deviceId;
 }
 
+// The public key of a cross-signing key object of the user with the usage, or empty if the object is not one.
+// A cross-signing key is named after itself: "keys": {"ed25519:<key>": "<key>"}.
+std::string CrossSigningKey(const TJson& object, const std::string& userId, const std::string& usage) {
+    if (!object.IsObject() || object.StringOr("user_id") != userId || !object["usage"].IsArray()) {
+        return {};
+    }
+    const auto& usages = object["usage"].AsArray();
+    if (std::none_of(usages.begin(), usages.end(), [&](const TJson& u) { return u.IsString() && u.AsString() == usage; })) {
+        return {};
+    }
+    const TJson& keys = object["keys"];
+    if (!keys.IsObject() || keys.AsObject().size() != 1) {
+        return {};
+    }
+    const auto& [keyId, key] = *keys.AsObject().begin();
+    if (!key.IsString() || key.AsString().empty() || keyId != DeviceKeyName("ed25519", key.AsString())) {
+        return {};
+    }
+    return key.AsString();
+}
+
 } // namespace
+
+std::map<std::string, TCrossSigning> CrossSigningFromQuery(const TJson& response) {
+    std::map<std::string, TCrossSigning> result;
+    const TJson& masters = response["master_keys"];
+    if (!masters.IsObject()) {
+        return result;
+    }
+    for (const auto& [userId, masterObject] : masters.AsObject()) {
+        TCrossSigning keys;
+        keys.Master = CrossSigningKey(masterObject, userId, "master");
+        if (keys.Master.empty()) {
+            continue;
+        }
+        // The other keys are the master key's to vouch for: a signature by the master key, named after it
+        const auto signedByMaster = [&](const char* field, const char* usage) -> std::string {
+            const TJson& object = response[field][userId];
+            const std::string key = CrossSigningKey(object, userId, usage);
+            return !key.empty() && VerifyJson(object, userId, keys.Master, keys.Master) ? key : std::string();
+        };
+        keys.SelfSigning = signedByMaster("self_signing_keys", "self_signing");
+        keys.UserSigning = signedByMaster("user_signing_keys", "user_signing");
+        result.emplace(userId, std::move(keys));
+    }
+    return result;
+}
 
 TJson SignJson(const TJson& object, const std::string& userId, const std::string& deviceId, const NOlm::TAccount& account) {
     const std::string canonical = TJson(SignedPart(object)).Dump();
@@ -26,6 +72,18 @@ TJson SignJson(const TJson& object, const std::string& userId, const std::string
     TJson::TObject signatures = object["signatures"].IsObject() ? object["signatures"].AsObject() : TJson::TObject{};
     TJson::TObject mine = signatures[userId].IsObject() ? signatures[userId].AsObject() : TJson::TObject{};
     mine[DeviceKeyName("ed25519", deviceId)] = account.Sign(canonical);
+    signatures[userId] = TJson(std::move(mine));
+    result["signatures"] = TJson(std::move(signatures));
+    return TJson(std::move(result));
+}
+
+TJson SignJsonWithKey(const TJson& object, const std::string& userId, const NCrypto::TEd25519KeyPair& key) {
+    const std::string canonical = TJson(SignedPart(object)).Dump();
+    const std::string publicKey = NCrypto::Base64Encode(NCrypto::ToBytes(key.Public));
+    TJson::TObject result = object.AsObject();
+    TJson::TObject signatures = object["signatures"].IsObject() ? object["signatures"].AsObject() : TJson::TObject{};
+    TJson::TObject mine = signatures[userId].IsObject() ? signatures[userId].AsObject() : TJson::TObject{};
+    mine[DeviceKeyName("ed25519", publicKey)] = NCrypto::Base64Encode(NCrypto::ToBytes(key.Sign(NCrypto::ToBytes(canonical))));
     signatures[userId] = TJson(std::move(mine));
     result["signatures"] = TJson(std::move(signatures));
     return TJson(std::move(result));
@@ -54,6 +112,7 @@ std::vector<TDevice> DevicesFromQuery(const TJson& response) {
     if (!users.IsObject()) {
         return devices;
     }
+    const auto crossSigning = CrossSigningFromQuery(response);
     for (const auto& [userId, userDevices] : users.AsObject()) {
         if (!userDevices.IsObject()) {
             continue;
@@ -69,7 +128,13 @@ std::vector<TDevice> DevicesFromQuery(const TJson& response) {
             if (ed25519.empty() || curve25519.empty() || !VerifyJson(keys, userId, deviceId, ed25519)) {
                 continue;
             }
-            devices.push_back({userId, deviceId, curve25519, ed25519});
+            std::string crossSignedBy;
+            if (const auto it = crossSigning.find(userId); it != crossSigning.end() && !it->second.SelfSigning.empty() &&
+                VerifyJson(keys, userId, it->second.SelfSigning, it->second.SelfSigning))
+            {
+                crossSignedBy = it->second.Master;
+            }
+            devices.push_back({userId, deviceId, curve25519, ed25519, std::move(crossSignedBy)});
         }
     }
     return devices;
@@ -231,6 +296,19 @@ bool TMachine::IsVerified(const TDevice& device) const {
     return it != Verified.end() && it->second == device.Ed25519;
 }
 
+void TMachine::TrustMasterKey(const std::string& userId, const std::string& masterKey) {
+    TrustedMasters[userId] = masterKey;
+}
+
+bool TMachine::IsMasterKeyTrusted(const std::string& userId, const std::string& masterKey) const {
+    const auto it = TrustedMasters.find(userId);
+    return !masterKey.empty() && it != TrustedMasters.end() && it->second == masterKey;
+}
+
+bool TMachine::IsTrusted(const TDevice& device) const {
+    return IsVerified(device) || IsMasterKeyTrusted(device.UserId, device.CrossSignedBy);
+}
+
 TJson TMachine::Save() const {
     TJson::TObject olm;
     for (const auto& [key, sessions] : OlmSessions) {
@@ -264,6 +342,7 @@ TJson TMachine::Save() const {
         {"outbound", TJson(std::move(outbound))},
         {"inbound", TJson(std::move(inbound))},
         {"verified", TJson(TJson::TObject(Verified.begin(), Verified.end()))},
+        {"trusted_masters", TJson(TJson::TObject(TrustedMasters.begin(), TrustedMasters.end()))},
     });
 }
 
@@ -313,6 +392,13 @@ std::optional<TMachine> TMachine::Load(const TJson& saved) {
         for (const auto& [device, key] : saved["verified"].AsObject()) {
             if (key.IsString()) {
                 machine.Verified[device] = key.AsString();
+            }
+        }
+    }
+    if (saved["trusted_masters"].IsObject()) {
+        for (const auto& [user, key] : saved["trusted_masters"].AsObject()) {
+            if (key.IsString()) {
+                machine.TrustedMasters[user] = key.AsString();
             }
         }
     }

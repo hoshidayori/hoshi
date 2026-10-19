@@ -23,7 +23,19 @@ inline constexpr const char* MegolmAlgorithm = "m.megolm.v1.aes-sha2";
 // Signs a JSON object as Matrix does: Ed25519 over the canonical JSON without "signatures" and "unsigned",
 // stored under signatures[userId]["ed25519:" + deviceId]
 TJson SignJson(const TJson& object, const std::string& userId, const std::string& deviceId, const NOlm::TAccount& account);
+// The same with a cross-signing key, named after its public key: signatures[userId]["ed25519:" + public key]
+TJson SignJsonWithKey(const TJson& object, const std::string& userId, const NCrypto::TEd25519KeyPair& key);
 bool VerifyJson(const TJson& object, const std::string& userId, const std::string& deviceId, const std::string& ed25519Key);
+
+// A user's cross-signing keys from /keys/query (base64 Ed25519 public keys), as in the spec's "Cross-signing"
+// section. The self-signing and user-signing keys count only if the master key signed them; otherwise they are
+// empty. The user-signing key is returned only for our own user.
+struct TCrossSigning {
+    std::string Master;
+    std::string SelfSigning;
+    std::string UserSigning;
+};
+std::map<std::string, TCrossSigning> CrossSigningFromQuery(const TJson& response);
 
 // A device of another user, from /keys/query, after its self-signature was checked
 struct TDevice {
@@ -31,9 +43,13 @@ struct TDevice {
     std::string DeviceId;
     std::string Curve25519;
     std::string Ed25519;
+    // The master key under which the device is cross-signed: its user's self-signing key, signed by this master
+    // key, signed the device's keys. Empty if the device is not cross-signed.
+    std::string CrossSignedBy = {};
 };
 
-// Devices with valid self-signatures from a /keys/query response; others are dropped
+// Devices with valid self-signatures from a /keys/query response; others are dropped. Cross-signing is checked
+// against the keys of the same response.
 std::vector<TDevice> DevicesFromQuery(const TJson& response);
 
 // When a room's outbound Megolm session is replaced, from m.room.encryption; the defaults are the spec's
@@ -83,6 +99,11 @@ public:
     // /keys/query returns the same key for it.
     void MarkVerified(const TDevice& device);
     bool IsVerified(const TDevice& device) const;
+    // Master keys our user confirmed by verification: the other side's MAC covered the key
+    void TrustMasterKey(const std::string& userId, const std::string& masterKey);
+    bool IsMasterKeyTrusted(const std::string& userId, const std::string& masterKey) const;
+    // Verified directly, or cross-signed under a master key we trust
+    bool IsTrusted(const TDevice& device) const;
 
     // Everything, private keys included: the caller stores it protected (Keychain or a protected file)
     TJson Save() const;
@@ -101,6 +122,7 @@ private:
     std::map<std::string, std::set<std::string>> SharedWith;
     std::map<std::string, std::int64_t> OutboundCreatedMs;
     std::map<std::string, std::string> Verified;  // "user|device" -> Ed25519 key
+    std::map<std::string, std::string> TrustedMasters;  // user -> master key
     // Megolm sessions for receiving, by (room, session id)
     std::map<std::pair<std::string, std::string>, NMegolm::TInboundSession> Inbound;
 };

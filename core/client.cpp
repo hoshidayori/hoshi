@@ -142,6 +142,39 @@ TJson TClient::QueryKeys(const std::vector<std::string>& userIds) {
     return Call("POST", "/_matrix/client/v3/keys/query", &body);
 }
 
+void TClient::UploadCrossSigningKeys(const TJson& keys, const std::string& password) {
+    const std::string path = "/_matrix/client/v3/keys/device_signing/upload";
+    // A server may take the first upload without user-interactive auth; otherwise its 401 opens a session
+    const THttpResponse first = Http->Send({"POST", Homeserver + path, AccessToken_, keys.Dump()});
+    if (first.Status >= 200 && first.Status < 300) {
+        return;
+    }
+    std::string session;
+    if (first.Status == 401) {
+        try {
+            session = TJson::Parse(first.Body).StringOr("session");
+        } catch (const std::runtime_error&) {
+        }
+    }
+    if (session.empty()) {
+        Call("POST", path, &keys);  // throws the server's error
+        return;
+    }
+    TJson::TObject body = keys.AsObject();
+    body["auth"] = TJson::TObject{
+        {"type", "m.login.password"},
+        {"identifier", TJson::TObject{{"type", "m.id.user"}, {"user", UserId_}}},
+        {"password", password},
+        {"session", session},
+    };
+    const TJson withAuth(std::move(body));
+    Call("POST", path, &withAuth);
+}
+
+TJson TClient::UploadSignatures(const TJson& signatures) {
+    return Call("POST", "/_matrix/client/v3/keys/signatures/upload", &signatures);
+}
+
 TJson TClient::ClaimKeys(const TJson& oneTimeKeys) {
     const TJson body(TJson::TObject{{"one_time_keys", oneTimeKeys}});
     return Call("POST", "/_matrix/client/v3/keys/claim", &body);

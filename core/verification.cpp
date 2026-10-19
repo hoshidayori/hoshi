@@ -115,6 +115,11 @@ void TVerification::StartSas() {
     State_ = EState::WaitingForAccept;
 }
 
+void TVerification::SetMasterKeys(std::string ours, std::string theirs) {
+    OurMasterKey = std::move(ours);
+    TheirMasterKey = std::move(theirs);
+}
+
 void TVerification::Receive(const std::string& type, const TJson& content, const std::string& sender) {
     // Another transaction, or someone else: not ours to answer
     if (sender != Them_.UserId || content.StringOr("transaction_id") != TransactionId_) {
@@ -254,11 +259,26 @@ void TVerification::ConfirmSas() {
         return;
     }
     Confirmed = true;
-    // Our device key, MACed so that the other side can check it is the key it has for us
-    const std::string keyId = "ed25519:" + Us.DeviceId;
+    // Our device key, MACed so that the other side can check it is the key it has for us, and our master key,
+    // so that it can trust our cross-signing identity
+    TJson::TObject macs;
+    std::vector<std::string> keyIds;
+    const auto add = [&](const std::string& keyId, const std::string& key) {
+        macs[keyId] = Sas.Mac(key, MacInfo(Us.UserId, Us.DeviceId, Them_.UserId, Them_.DeviceId, keyId));
+        keyIds.push_back(keyId);
+    };
+    add("ed25519:" + Us.DeviceId, Us.Ed25519);
+    if (!OurMasterKey.empty()) {
+        add("ed25519:" + OurMasterKey, OurMasterKey);
+    }
+    std::sort(keyIds.begin(), keyIds.end());
+    std::string joined;
+    for (const auto& keyId : keyIds) {
+        joined += (joined.empty() ? "" : ",") + keyId;
+    }
     Send("m.key.verification.mac", {
-        {"mac", TJson::TObject{{keyId, Sas.Mac(Us.Ed25519, MacInfo(Us.UserId, Us.DeviceId, Them_.UserId, Them_.DeviceId, keyId))}}},
-        {"keys", Sas.Mac(keyId, MacInfo(Us.UserId, Us.DeviceId, Them_.UserId, Them_.DeviceId, "KEY_IDS"))},
+        {"mac", TJson(std::move(macs))},
+        {"keys", Sas.Mac(joined, MacInfo(Us.UserId, Us.DeviceId, Them_.UserId, Them_.DeviceId, "KEY_IDS"))},
     });
     State_ = EState::WaitingForMac;
     if (TheirMac) {
@@ -295,21 +315,28 @@ void TVerification::CheckMac() {
         return;
     }
     const std::string deviceKeyId = "ed25519:" + Them_.DeviceId;
+    const std::string masterKeyId = TheirMasterKey.empty() ? std::string() : "ed25519:" + TheirMasterKey;
     bool deviceKeyChecked = false;
+    bool masterKeyChecked = false;
     for (const auto& [keyId, mac] : macs.AsObject()) {
-        // Keys we do not hold yet, such as a cross-signing master key, cannot be checked, so they prove nothing
-        if (keyId != deviceKeyId) {
+        // Keys we do not hold cannot be checked, so they prove nothing
+        const bool isDevice = keyId == deviceKeyId;
+        if (!isDevice && keyId != masterKeyId) {
             continue;
         }
-        if (!mac.IsString() || mac.AsString() != Sas.Mac(Them_.Ed25519, MacInfo(Them_.UserId, Them_.DeviceId, Us.UserId, Us.DeviceId, keyId))) {
-            Cancel("m.key_mismatch", "The device key does not match");
+        const std::string& key = isDevice ? Them_.Ed25519 : TheirMasterKey;
+        if (!mac.IsString() || mac.AsString() != Sas.Mac(key, MacInfo(Them_.UserId, Them_.DeviceId, Us.UserId, Us.DeviceId, keyId))) {
+            Cancel("m.key_mismatch", isDevice ? "The device key does not match" : "The master key does not match");
             return;
         }
-        deviceKeyChecked = true;
+        (isDevice ? deviceKeyChecked : masterKeyChecked) = true;
     }
     if (!deviceKeyChecked) {
         Cancel("m.key_mismatch", "The device key is missing");
         return;
+    }
+    if (masterKeyChecked) {
+        VerifiedMasterKey_ = TheirMasterKey;
     }
     Send("m.key.verification.done", {});
     State_ = EState::WaitingForDone;

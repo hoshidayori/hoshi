@@ -75,6 +75,10 @@ public:
     TJson UploadKeys(const TJson& body);                       // POST /keys/upload
     TJson QueryKeys(const std::vector<std::string>& userIds);  // POST /keys/query
     TJson ClaimKeys(const TJson& oneTimeKeys);                 // POST /keys/claim, user -> device -> algorithm
+    // POST /keys/device_signing/upload: {"master_key", "self_signing_key", "user_signing_key"}; the server asks
+    // for the password (user-interactive auth) unless it takes the first upload without it
+    void UploadCrossSigningKeys(const TJson& keys, const std::string& password);
+    TJson UploadSignatures(const TJson& signatures);           // POST /keys/signatures/upload, user -> key id -> object
     void SendToDevice(const std::string& type, const TJson& messages, const std::string& txnId);
     // Any room event; returns the event id
     std::string SendEvent(const std::string& roomId, const std::string& type, const TJson& content, const std::string& txnId);
