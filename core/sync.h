@@ -22,6 +22,8 @@ struct TMessage {
     std::string Sender;
     std::string MsgType;  // m.text, m.notice, m.emote, m.image, ...
     std::string Body;
+    // formatted_body when the format is org.matrix.custom.html, else empty; shown with NHtml::Parse
+    std::string FormattedBody;
     std::int64_t OriginServerTs = 0;
     std::string TxnId;  // for messages sent from this device: the transaction id of the send request
     ESendState SendState = ESendState::Sent;
@@ -63,6 +65,9 @@ struct TInvite {
     std::string Inviter;
     bool Encrypted = false;
 };
+
+// The HTML of an m.room.message content, if it has formatted_body in the format the spec defines; else empty
+std::string FormattedBodyOf(const TJson& content);
 
 // The part of a /sync response the client keeps. Rooms are keyed by room id.
 struct TSyncState {

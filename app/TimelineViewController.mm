@@ -2,6 +2,8 @@
 #import "Session.h"
 #import "TimelineText.h"
 
+#include "html.h"
+
 #include <algorithm>
 #include <functional>
 #include <string_view>
@@ -22,6 +24,65 @@ UIColor* SenderColor(const std::string& userId) {
         UIColor.systemPurpleColor, UIColor.systemTealColor, UIColor.systemIndigoColor, UIColor.systemBrownColor,
     ];
     return palette[std::hash<std::string>{}(userId) % palette.count];
+}
+
+// The body font with the traits of a style
+UIFont* StyledFont(UIFont* base, unsigned style) {
+    using namespace NHoshi::NHtml;
+    if (style & (Code | CodeBlock)) {
+        UIFont* mono = [UIFont monospacedSystemFontOfSize:base.pointSize * 0.94 weight:UIFontWeightRegular];
+        return style & Bold ? [UIFont monospacedSystemFontOfSize:mono.pointSize weight:UIFontWeightBold] : mono;
+    }
+    UIFontDescriptorSymbolicTraits traits = 0;
+    if (style & Bold) {
+        traits |= UIFontDescriptorTraitBold;
+    }
+    if (style & Italic) {
+        traits |= UIFontDescriptorTraitItalic;
+    }
+    const CGFloat size = style & Heading ? base.pointSize * 1.15 : 0;
+    if (!traits && !size) {
+        return base;
+    }
+    UIFontDescriptor* descriptor = [base.fontDescriptor fontDescriptorWithSymbolicTraits:traits] ?: base.fontDescriptor;
+    return [UIFont fontWithDescriptor:descriptor size:size];
+}
+
+// The text of a formatted body. Its line breaks are line separators, so the message stays one paragraph with
+// one bubble, as a plain body does; the copy turns them into newlines.
+NSAttributedString* FormattedText(const std::string& html, NSDictionary<NSAttributedStringKey, id>* base) {
+    using namespace NHoshi::NHtml;
+    NSMutableAttributedString* text = [[NSMutableAttributedString alloc] init];
+    UIFont* font = base[NSFontAttributeName];
+    for (const auto& run : Parse(html)) {
+        NSString* string = [ToNs(run.Text) stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+        NSMutableDictionary<NSAttributedStringKey, id>* attributes = [base mutableCopy];
+        attributes[NSFontAttributeName] = StyledFont(font, run.Style);
+        if (run.Style & (Code | CodeBlock)) {
+            attributes[NSBackgroundColorAttributeName] = UIColor.tertiarySystemFillColor;
+        }
+        if (run.Style & Underline) {
+            attributes[NSUnderlineStyleAttributeName] = @(NSUnderlineStyleSingle);
+        }
+        if (run.Style & Strike) {
+            attributes[NSStrikethroughStyleAttributeName] = @(NSUnderlineStyleSingle);
+        }
+        if (run.Style & Quote) {
+            attributes[NSForegroundColorAttributeName] = UIColor.secondaryLabelColor;
+        }
+        if (run.Style & Spoiler) {
+            // Hidden under a bar of its own color; selecting and copying still gives the text
+            attributes[NSForegroundColorAttributeName] = UIColor.systemGray3Color;
+            attributes[NSBackgroundColorAttributeName] = UIColor.systemGray3Color;
+        }
+        if (!run.Link.empty()) {
+            if (NSURL* url = [NSURL URLWithString:ToNs(run.Link)]) {
+                attributes[NSLinkAttributeName] = url;
+            }
+        }
+        [text appendAttributedString:[[NSAttributedString alloc] initWithString:string attributes:attributes]];
+    }
+    return text;
 }
 
 NSString* TimeOf(std::int64_t originServerTs) {
@@ -378,12 +439,20 @@ static const CGFloat MaxInputLines = 6;
             color = UIColor.secondaryLabelColor;
         }
     }
-    [item appendAttributedString:[[NSAttributedString alloc] initWithString:[body stringByAppendingString:@"\n"] attributes:@{
+    NSDictionary<NSAttributedStringKey, id>* attributes = @{
         NSFontAttributeName: font,
         NSForegroundColorAttributeName: color,
         NSParagraphStyleAttributeName: style,
         HSMessageMetaAttribute: meta,
-    }]];
+    };
+    NSAttributedString* formatted = !meta.waitingForKey && !message.FormattedBody.empty()
+        ? FormattedText(message.FormattedBody, attributes) : nil;
+    if (formatted.length > 0) {
+        [item appendAttributedString:formatted];
+        [item appendAttributedString:[[NSAttributedString alloc] initWithString:@"\n" attributes:attributes]];
+    } else {
+        [item appendAttributedString:[[NSAttributedString alloc] initWithString:[body stringByAppendingString:@"\n"] attributes:attributes]];
+    }
     return item;
 }
 
@@ -636,7 +705,7 @@ static const CGFloat MaxInputLines = 6;
         state.SendState = static_cast<int>(message.SendState);
         state.WaitingForKey = message.IsWaitingForKey();
         state.Minute = message.OriginServerTs / 60000;
-        state.Body = std::hash<std::string>{}(message.Body);
+        state.Body = std::hash<std::string>{}(message.Body) ^ (std::hash<std::string>{}(message.FormattedBody) << 1);
         if (state.ShowSender) {
             const auto name = room.MemberNames.find(message.Sender);
             const auto avatar = room.MemberAvatars.find(message.Sender);

@@ -17,6 +17,7 @@ else()
 endif()
 
 add_library(hoshi_core
+    core/html.cpp
     core/json.cpp
     core/sync.cpp
     core/client.cpp
@@ -117,6 +118,11 @@ add_executable(e2ee_test core/e2ee_test.cpp)
 target_link_libraries(e2ee_test PRIVATE hoshi_crypto hoshi_core)
 target_compile_options(e2ee_test PRIVATE -Wall -Wextra -Werror)
 add_test(NAME e2ee_test COMMAND e2ee_test)
+
+add_executable(html_test core/html_test.cpp)
+target_link_libraries(html_test PRIVATE hoshi_core)
+target_compile_options(html_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME html_test COMMAND html_test)
 
 add_executable(cross_signing_test core/cross_signing_test.cpp)
 target_link_libraries(cross_signing_test PRIVATE hoshi_crypto hoshi_core)

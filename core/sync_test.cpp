@@ -95,6 +95,22 @@ int main() {
     Expect(after.Timeline.size() == 2, "messages append across syncs");
     Expect(after.Timeline.at(1).Body == "и тебе привет", "second message");
     Expect(after.Name == "Звёзды", "rename in timeline");
+    Expect(after.Timeline.at(1).FormattedBody.empty(), "no formatted body");
+
+    // The formatted body is kept only in the format the spec defines
+    {
+        TSyncState formatted;
+        formatted.Apply(TJson::Parse(R"({"next_batch": "f", "rooms": {"join": {"!f:x": {"timeline": {"events": [
+            {"type": "m.room.message", "sender": "@bob:x", "event_id": "$html",
+             "content": {"msgtype": "m.text", "body": "**жирный**", "format": "org.matrix.custom.html", "formatted_body": "<b>жирный</b>"}},
+            {"type": "m.room.message", "sender": "@bob:x", "event_id": "$markdown",
+             "content": {"msgtype": "m.text", "body": "x", "format": "text/markdown", "formatted_body": "*x*"}}
+        ]}}}}})"));
+        const auto& timeline = formatted.Rooms.at("!f:x").Timeline;
+        Expect(timeline.size() == 2 && timeline[0].FormattedBody == "<b>жирный</b>" && timeline[0].Body == "**жирный**",
+            "the HTML body and the plain one");
+        Expect(timeline.size() == 2 && timeline[1].FormattedBody.empty(), "another format is ignored");
+    }
 
     // History before the limited timeline: dir=b gives the newest first, state events must not win
     state.PrependHistory("!726s6s6q:example.com", TJson::Parse(R"({"start": "t34-23535_0_0", "end": "t20-1_0_0", "chunk": [

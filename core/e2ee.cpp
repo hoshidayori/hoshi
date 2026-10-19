@@ -530,6 +530,7 @@ bool DecryptWaiting(TSyncState& state, const TMachine& machine) {
             if (payload->StringOr("type") == "m.room.message" && content["body"].IsString()) {
                 message.MsgType = content.StringOr("msgtype", "m.text");
                 message.Body = content["body"].AsString();
+                message.FormattedBody = FormattedBodyOf(content);
             } else {
                 message.MsgType = payload->StringOr("type", "unknown");  // removed below
             }

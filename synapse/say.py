@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Sends a text message as a test user to every joined room with the given name on the local test Synapse,
 through its Unix socket. For trying the app by hand: someone else writes while you watch the timeline.
-Usage: say.py USER PASSWORD ROOM_NAME TEXT"""
+Usage: say.py USER PASSWORD ROOM_NAME TEXT [HTML]
+With HTML, the message also has it as its org.matrix.custom.html formatted body."""
 import http.client
 import json
 import os
@@ -38,6 +39,9 @@ def call(method, path, body=None, token=None):
 
 def main():
     user, password, room_name, text = sys.argv[1:5]
+    content = {'msgtype': 'm.text', 'body': text}
+    if len(sys.argv) > 5:
+        content.update({'format': 'org.matrix.custom.html', 'formatted_body': sys.argv[5]})
     token = call('POST', '/_matrix/client/v3/login', {
         'type': 'm.login.password', 'identifier': {'type': 'm.id.user', 'user': user}, 'password': password,
     })['access_token']
@@ -51,7 +55,7 @@ def main():
         if name == room_name:
             txn = uuid.uuid4().hex
             sent = call('PUT', f'/_matrix/client/v3/rooms/{quoted}/send/m.room.message/{txn}',
-                        {'msgtype': 'm.text', 'body': text}, token)
+                        content, token)
             print('sent', room, sent['event_id'])
     call('POST', '/_matrix/client/v3/logout', {}, token)
 

@@ -6,6 +6,10 @@
 
 namespace NHoshi {
 
+std::string FormattedBodyOf(const TJson& content) {
+    return content.StringOr("format") == "org.matrix.custom.html" ? content.StringOr("formatted_body") : std::string();
+}
+
 namespace {
 
 // State events can come both in the state section and in the timeline, so both go through this
@@ -78,6 +82,7 @@ std::optional<TMessage> ParseMessage(const TJson& event) {
     message.Sender = event.StringOr("sender");
     message.MsgType = content.StringOr("msgtype");
     message.Body = content["body"].AsString();
+    message.FormattedBody = FormattedBodyOf(content);
     if (event["origin_server_ts"].IsInt()) {
         message.OriginServerTs = event["origin_server_ts"].AsInt();
     }
