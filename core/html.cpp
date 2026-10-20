@@ -11,6 +11,7 @@ namespace NHoshi::NHtml {
 namespace {
 
 constexpr int MaxDepth = 64;  // deeper nesting adds no more meaning; it only costs
+constexpr long MaxListStart = 1'000'000'000;
 
 std::string Lower(std::string_view s) {
     std::string result(s);
@@ -97,6 +98,7 @@ struct TTag {
     std::string Name;  // lower case
     bool Closing = false;
     bool SelfClosing = false;
+    bool Unended = false;  // the input ended before its '>'
     std::map<std::string, std::string> Attributes;  // names in lower case, values decoded
 };
 
@@ -164,6 +166,7 @@ std::optional<size_t> ParseTag(std::string_view html, size_t pos, TTag& tag) {
             tag.Attributes.emplace(name, std::move(value));
         }
     }
+    tag.Unended = true;
     return std::nullopt;  // no '>': the rest is text
 }
 
@@ -243,7 +246,8 @@ public:
             TList list{n == "ol"};
             if (const auto start = tag.Attributes.find("start"); list.Ordered && start != tag.Attributes.end()) {
                 try {
-                    list.Next = std::stol(start->second);
+                    // Numbering goes on from the start, so a start near the limit of long would overflow it
+                    list.Next = std::clamp(std::stol(start->second), -MaxListStart, MaxListStart);
                 } catch (const std::exception&) {
                 }
             }
@@ -467,6 +471,12 @@ private:
             }
             TTag tag;
             const auto end = ParseTag(Html, Pos + 1, tag);
+            if (!end && tag.Unended) {
+                // A later '<' would scan to the end again, which is quadratic on a long body: the rest is text
+                Builder.Text(DecodeEntities(Html.substr(Pos)));
+                Pos = Html.size();
+                return;
+            }
             if (!end) {
                 Builder.Text("<");  // a '<' that starts no tag is text
                 ++Pos;
@@ -522,6 +532,9 @@ private:
             if (end && tag.Name == name) {
                 Pos = *end;
                 return;
+            }
+            if (tag.Unended) {
+                break;
             }
             Pos = lt + 2;
         }

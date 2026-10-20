@@ -1,6 +1,7 @@
 // The formatted body of messages: styles, blocks, links, entities, the reply fallback and broken HTML
 #include "html.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -130,6 +131,16 @@ void TestBroken() {
         deep += "</b>";
     }
     ExpectText(deep, "x", "deep nesting stops at the limit and does not crash");
+
+    std::string unended = "<a x=\">\"";
+    while (unended.size() < 65536) {
+        unended += " <a x=\">\"";
+    }
+    const auto started = std::chrono::steady_clock::now();
+    Expect(PlainText(Parse(unended)) == unended, "tags that never end are text");
+    Expect(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(200), "and take linear time");
+    ExpectText("<ol start=\"9223372036854775807\"><li>a</li><li>b</li></ol>", "1000000000. a\n1000000001. b",
+        "a list start near the limit of long does not overflow");
     ExpectText("", "", "empty");
     ExpectText("<p></p><br><p> </p>", "", "only empty blocks");
 }
